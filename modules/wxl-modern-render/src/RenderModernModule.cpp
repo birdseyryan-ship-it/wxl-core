@@ -111,7 +111,7 @@ namespace wxl::scripts::render_modern
             IDirect3DResource9* depth = static_cast<IDirect3DResource9*>(a.depthSource);
             Pipeline::Get().Frame(on12_, WxlD3D12Device(),
                                   static_cast<IDirect3DResource9*>(bb), superSample, depth,
-                                  a.proj ? a.proj : cam::Projection(), cam::View());
+                                  a.proj ? a.proj : cam::GetProjection(), cam::GetView());
 
             bb->Release();
             WxlD3D12DrainDebug();
