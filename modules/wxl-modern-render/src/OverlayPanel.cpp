@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-#include "overlay/Panels.hpp"
+#include "engine/ui/ImGuiHost.hpp"
 #include "gpu/Pipeline.hpp"
 #include "engine/gpu/Proxy.hpp"
 
@@ -29,7 +29,7 @@ namespace wxl::scripts::render_modern
     {
         const char* const k_qualityNames[] = { "Low", "Medium", "High", "Ultra" };
 
-        void DrawGraphicsPanel()
+        void __cdecl DrawGraphicsPanel(void*)
         {
             const auto& effects = Pipeline::Get().Effects();
             if (effects.empty())
@@ -49,6 +49,10 @@ namespace wxl::scripts::render_modern
 
             for (const auto& e : effects)
             {
+                // R3A validates colour-only AA first. Depth-dependent effects remain locked
+                // until the readable-depth/world redirect is implemented and proven.
+                if (e->NeedsDepth()) continue;
+
                 ImGui::PushID(e.get());
 
                 bool on = e->Enabled();
@@ -79,26 +83,15 @@ namespace wxl::scripts::render_modern
                 ImGui::PopID();
             }
 
-            // Render scale (formerly SSAA): the world renders at native * scale and the pipeline scales the
-            // result onto the backbuffer -- a supersampling downsample above 100%, a bilinear upscale below it.
-            // It is independent of the effects above (each runs at the scaled resolution), is compatible with the
-            // engine's native MSAA, and applies live on the next frame. 100% = off.
             ImGui::Spacing();
-            ImGui::TextUnformatted("Render Scale");
-            int pct = (int)(WxlGetSsaaFactor() * 100.0f + 0.5f);
-            ImGui::SetNextItemWidth(160.0f);
-            if (ImGui::SliderInt("##renderscale", &pct, 50, 200, "%d%%"))
-            {
-                if (pct < 50)  pct = 50;
-                if (pct > 200) pct = 200;
-                WxlSetSsaaFactor((float)pct / 100.0f);
-            }
+            ImGui::Separator();
+            ImGui::TextDisabled("R3A: SSAO and Render Scale locked pending readable-depth validation.");
         }
 
         // File-scope registration: adds the panel at DLL load, before the overlay first draws.
         struct PanelRegistrar
         {
-            PanelRegistrar() { wxl::overlay::RegisterPanel("Graphics", &DrawGraphicsPanel); }
+            PanelRegistrar() { wxl::ui::AddPanel("Graphics", &DrawGraphicsPanel, nullptr); }
         } g_panelRegistrar;
     }
 }

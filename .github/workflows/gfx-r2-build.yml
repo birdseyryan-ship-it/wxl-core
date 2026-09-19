@@ -1,9 +1,9 @@
-name: GFX-R2 Win32 Build
+name: GFX-R3 Win32 Build
 
 on:
   push:
     branches:
-      - gfx-r2-modern-render-port
+      - gfx-r3-modern-aa
   workflow_dispatch:
 
 permissions:
@@ -14,7 +14,7 @@ defaults:
     shell: pwsh
 
 jobs:
-  build-r2:
+  build-r3:
     runs-on: windows-latest
 
     steps:
@@ -30,40 +30,40 @@ jobs:
           git log -1 --format="Commit: %H%nParent: %P%nSubject: %s"
 
       - name: Configure Win32
-        run: cmake -S . -B build-r2 -A Win32
+        run: cmake -S . -B build-r3 -A Win32
 
       - name: Build WarcraftXL
-        run: cmake --build build-r2 --config Release --target WarcraftXL --parallel
+        run: cmake --build build-r3 --config Release --target WarcraftXL --parallel
 
       - name: Build d3d9 proxy
-        run: cmake --build build-r2 --config Release --target d3d9 --parallel
+        run: cmake --build build-r3 --config Release --target d3d9 --parallel
 
-      - name: Stage R2 binaries
+      - name: Stage R3 binaries
         run: |
-          New-Item -ItemType Directory -Force -Path dist-r2 | Out-Null
-          Copy-Item "build-r2\Release\WarcraftXL.dll" "dist-r2\WarcraftXL.dll"
-          Copy-Item "build-r2\Release\d3d9.dll" "dist-r2\d3d9.dll"
+          New-Item -ItemType Directory -Force -Path dist-r3 | Out-Null
+          Copy-Item "build-r3\Release\WarcraftXL.dll" "dist-r3\WarcraftXL.dll"
+          Copy-Item "build-r3\Release\d3d9.dll" "dist-r3\d3d9.dll"
 
       - name: Record binary hashes
         run: |
           $files = @(
-            "dist-r2\WarcraftXL.dll",
-            "dist-r2\d3d9.dll"
+            "dist-r3\WarcraftXL.dll",
+            "dist-r3\d3d9.dll"
           )
           foreach ($file in $files) {
             $hash = (Get-FileHash -Algorithm SHA256 $file).Hash.ToLower()
             $name = Split-Path $file -Leaf
-            "$hash  $name" | Tee-Object -FilePath "dist-r2\SHA256SUMS.txt" -Append
+            "$hash  $name" | Tee-Object -FilePath "dist-r3\SHA256SUMS.txt" -Append
           }
-          Get-Content "dist-r2\SHA256SUMS.txt"
+          Get-Content "dist-r3\SHA256SUMS.txt"
 
-      - name: Upload R2 candidate
+      - name: Upload R3 candidate
         uses: actions/upload-artifact@v4
         with:
-          name: gfx-r2-candidate-${{ github.sha }}
+          name: gfx-r3-candidate-${{ github.sha }}
           path: |
-            dist-r2/WarcraftXL.dll
-            dist-r2/d3d9.dll
-            dist-r2/SHA256SUMS.txt
+            dist-r3/WarcraftXL.dll
+            dist-r3/d3d9.dll
+            dist-r3/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 14

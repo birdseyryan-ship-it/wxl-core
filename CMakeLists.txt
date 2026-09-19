@@ -95,13 +95,10 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 4)
     target_link_libraries(WarcraftXL PRIVATE minhook d3d9 shell32)
     target_compile_definitions(WarcraftXL PRIVATE ${WXL_DEFS})
 
-    # --- GFX-R2 locked modern-render passthrough ---------------------------------
-    # Compile the D3D12 framework/effects, but deliberately exclude:
-    #   OverlayPanel.cpp    -> no user can enable an effect during R2
-    #   grass/GrassMotion   -> belongs to the later environment phase
-    #
-    # With all effects at their upstream disabled defaults and render scale 1.0,
-    # RenderModernModule validates On12 and then exits without modifying the frame.
+    # --- GFX-R3A modern AA validation ---------------------------------------------
+    # Compile the D3D12 framework/effects plus the current-UI-adapted Graphics panel.
+    # R3A exposes colour-only AA (FXAA/SMAA/CMAA2) while SSAO and Render Scale remain
+    # locked until the readable-depth/world redirect is implemented and validated.
     file(GLOB_RECURSE WXL_RENDER_MODERN_GPU CONFIGURE_DEPENDS
          "${CMAKE_CURRENT_SOURCE_DIR}/modules/wxl-modern-render/src/gpu/*.cpp")
 
@@ -110,6 +107,7 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 4)
 
     target_sources(WarcraftXL PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/modules/wxl-modern-render/src/RenderModernModule.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/modules/wxl-modern-render/src/OverlayPanel.cpp"
         ${WXL_RENDER_MODERN_GPU}
         ${WXL_RENDER_MODERN_EFFECTS})
 
@@ -117,7 +115,7 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 4)
         "${CMAKE_CURRENT_SOURCE_DIR}/modules/wxl-modern-render/src")
 
     target_link_libraries(WarcraftXL PRIVATE d3d12 d3dcompiler)
-    # --- end GFX-R2 locked modern-render passthrough -----------------------------
+    # --- end GFX-R3A modern AA validation ----------------------------------------
 
     source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" FILES ${WXL_CORE_SRC})
 
