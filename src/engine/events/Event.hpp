@@ -110,7 +110,14 @@ namespace wxl::events
      * @brief Args for OnWorldRenderEnd: the world -> UI boundary of the frame. A subscriber draws
      *        post-world effects here, before the client renders the interface on top.
      */
-    struct WorldRenderEndArgs { void* device; };
+    struct WorldRenderEndArgs
+    {
+        void*        device;
+        void*        superSampleSource;
+        float        ssaaFactor;
+        void*        depthSource;
+        const float* proj;
+    };
     /**
      * @brief Args for OnWorldSceneEnd: the world is drawn and the camera matrices that drew it are
      *        still on the device. Its caller puts the pre-world projection and view back immediately

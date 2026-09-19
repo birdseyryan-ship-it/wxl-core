@@ -149,7 +149,13 @@ namespace
 
         g_origWorldFinalize(worldFrame);
 
-        ev::WorldRenderEndArgs a{ gx::RawDevice() };
+        ev::WorldRenderEndArgs a{
+            gx::RawDevice(),
+            nullptr,
+            1.0f,
+            nullptr,
+            nullptr
+        };
         ev::Emit(ev::Event::OnWorldRenderEnd, &a);
     }
 
@@ -262,3 +268,14 @@ namespace
 }
 
 WXL_REGISTER_FEATURE("render", true, Install)
+
+// GFX-R2: compatibility seam for wxl-modern-render.
+// Effects are not user-accessible in R2, therefore depth is never requested.
+// R3 replaces this no-op with the readable-world-depth implementation.
+namespace wxl::runtime::render
+{
+    void SetReadableDepthNeeded(bool needed)
+    {
+        (void)needed;
+    }
+}
