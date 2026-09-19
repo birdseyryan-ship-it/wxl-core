@@ -46,12 +46,21 @@ namespace wxl::scripts::render_modern::d3d9fallback
         IDirect3DDevice9*      g_device = nullptr;
         IDirect3DTexture9*     g_sceneTexture = nullptr;
         IDirect3DSurface9*     g_sceneSurface = nullptr;
+
+        // R3D1: single-sample sampleable copy of the completed world depth.
+        IDirect3DTexture9*     g_depthTexture = nullptr;
+        IDirect3DSurface9*     g_depthSurface = nullptr;
+
         IDirect3DPixelShader9* g_proofShader = nullptr;
+        IDirect3DPixelShader9* g_depthProofShader = nullptr;
         IDirect3DPixelShader9* g_fxaaShader[3] = { nullptr, nullptr, nullptr };
 
         UINT      g_width = 0;
         UINT      g_height = 0;
         D3DFORMAT g_format = D3DFMT_UNKNOWN;
+
+        UINT      g_depthWidth = 0;
+        UINT      g_depthHeight = 0;
 
         bool g_proofTint = false;
         int  g_lastLoggedMode = -1;
@@ -60,6 +69,8 @@ namespace wxl::scripts::render_modern::d3d9fallback
         bool g_loggedStretchFail = false;
         bool g_loggedBeginFail = false;
         bool g_loggedDrawFail = false;
+        bool g_loggedDepthStretchFail = false;
+        bool g_loggedDepthCopyPass = false;
 
         struct FsVertex
         {
@@ -69,13 +80,47 @@ namespace wxl::scripts::render_modern::d3d9fallback
 
         constexpr DWORD kFsFvf = D3DFVF_XYZRHW | D3DFVF_TEX1;
 
+        constexpr D3DFORMAT kIntz =
+            static_cast<D3DFORMAT>(
+                MAKEFOURCC('I', 'N', 'T', 'Z'));
+
+        bool DepthProofEnabled()
+        {
+            static const bool enabled = []()
+            {
+                char value[16] = {};
+                const DWORD n = GetEnvironmentVariableA(
+                    "WXL_DEPTH_PROOF",
+                    value,
+                    sizeof(value));
+
+                if (!n || n >= sizeof(value))
+                    return false;
+
+                const char c = value[0];
+
+                return c != '0' &&
+                       c != 'n' && c != 'N' &&
+                       c != 'f' && c != 'F';
+            }();
+
+            return enabled;
+        }
+
         void ReleaseTarget()
         {
             SafeRelease(g_sceneSurface);
             SafeRelease(g_sceneTexture);
+
+            SafeRelease(g_depthSurface);
+            SafeRelease(g_depthTexture);
+
             g_width = 0;
             g_height = 0;
             g_format = D3DFMT_UNKNOWN;
+
+            g_depthWidth = 0;
+            g_depthHeight = 0;
         }
 
         void ReleaseRuntime()
@@ -84,6 +129,8 @@ namespace wxl::scripts::render_modern::d3d9fallback
             d3d9smaa::PrepareForReset();
 
             SafeRelease(g_proofShader);
+            SafeRelease(g_depthProofShader);
+
             for (auto*& p : g_fxaaShader)
                 SafeRelease(p);
 
@@ -96,6 +143,8 @@ namespace wxl::scripts::render_modern::d3d9fallback
             g_loggedStretchFail = false;
             g_loggedBeginFail = false;
             g_loggedDrawFail = false;
+            g_loggedDepthStretchFail = false;
+            g_loggedDepthCopyPass = false;
         }
 
         bool CompilePixelShader(IDirect3DDevice9* dev,
@@ -185,6 +234,115 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                 return false;
 
             WLOG_INFO("wxl-modern-d3d9: proof-tint shader ready");
+            return true;
+        }
+
+        bool EnsureDepthProofShader(IDirect3DDevice9* dev)
+        {
+            if (g_depthProofShader)
+                return true;
+
+            // D3D depth is strongly non-linear. 1-depth is approximately
+            // proportional to near/z, so the fourth root expands the useful
+            // near/mid-distance range for an easily inspected grayscale proof.
+            static const char* kDepthProofPs = R"HLSL(
+sampler2D depthTex : register(s0);
+
+float4 main(float2 uv : TEXCOORD0) : COLOR0
+{
+    float d = tex2D(depthTex, uv).r;
+    float proximity = saturate(1.0 - d);
+    float v = pow(proximity, 0.25);
+    return float4(v, v, v, 1.0);
+}
+)HLSL";
+
+            if (!CompilePixelShader(
+                    dev,
+                    kDepthProofPs,
+                    "R3D1 INTZ depth proof",
+                    &g_depthProofShader))
+                return false;
+
+            WLOG_INFO(
+                "wxl-modern-d3d9: R3D1 depth-proof shader ready");
+
+            return true;
+        }
+
+        bool EnsureDepthTarget(IDirect3DDevice9* dev,
+                               IDirect3DSurface9* sourceDepth)
+        {
+            if (!dev || !sourceDepth)
+                return false;
+
+            D3DSURFACE_DESC desc = {};
+
+            if (FAILED(sourceDepth->GetDesc(&desc)))
+                return false;
+
+            if (g_depthTexture &&
+                g_depthSurface &&
+                g_depthWidth == desc.Width &&
+                g_depthHeight == desc.Height)
+                return true;
+
+            SafeRelease(g_depthSurface);
+            SafeRelease(g_depthTexture);
+
+            g_depthWidth = 0;
+            g_depthHeight = 0;
+
+            HRESULT hr = dev->CreateTexture(
+                desc.Width,
+                desc.Height,
+                1,
+                D3DUSAGE_DEPTHSTENCIL,
+                kIntz,
+                D3DPOOL_DEFAULT,
+                &g_depthTexture,
+                nullptr);
+
+            if (FAILED(hr) || !g_depthTexture)
+            {
+                WLOG_ERROR(
+                    "wxl-modern-d3d9: R3D1 INTZ texture creation "
+                    "failed %ux%u hr=0x%08X",
+                    desc.Width,
+                    desc.Height,
+                    static_cast<unsigned>(hr));
+
+                SafeRelease(g_depthTexture);
+                return false;
+            }
+
+            hr = g_depthTexture->GetSurfaceLevel(
+                0,
+                &g_depthSurface);
+
+            if (FAILED(hr) || !g_depthSurface)
+            {
+                WLOG_ERROR(
+                    "wxl-modern-d3d9: R3D1 INTZ surface acquisition "
+                    "failed hr=0x%08X",
+                    static_cast<unsigned>(hr));
+
+                SafeRelease(g_depthSurface);
+                SafeRelease(g_depthTexture);
+                return false;
+            }
+
+            g_depthWidth = desc.Width;
+            g_depthHeight = desc.Height;
+
+            WLOG_INFO(
+                "wxl-modern-d3d9: R3D1 INTZ target ready "
+                "%ux%u sourceFmt=%u sourceMSAA=%u",
+                desc.Width,
+                desc.Height,
+                static_cast<unsigned>(desc.Format),
+                static_cast<unsigned>(desc.MultiSampleType));
+
             return true;
         }
 
@@ -391,23 +549,28 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
         if (!Available() || !device)
             return false;
 
-        // R3D0 is diagnostic only: inspect the actual live depth surface and
-        // driver FourCC support once without changing the rendered frame.
-        d3d9depthprobe::ProbeOnce(device);
-
-        if (!g_proofTint && !fxaaEnabled && !smaaEnabled)
-        {
-            g_lastLoggedMode = -1;
-            g_lastLoggedTier = -1;
-            return false;
-        }
-
         if (g_device != device)
         {
             ReleaseRuntime();
             g_device = device;
             WLOG_INFO(
                 "wxl-modern-d3d9: Proton/Wine fallback backend active");
+        }
+
+        // Keep the earlier capability probe for evidence, now after the
+        // device-change reset so it runs only once per live device.
+        d3d9depthprobe::ProbeOnce(device);
+
+        const bool depthProof = DepthProofEnabled();
+
+        if (!depthProof &&
+            !g_proofTint &&
+            !fxaaEnabled &&
+            !smaaEnabled)
+        {
+            g_lastLoggedMode = -1;
+            g_lastLoggedTier = -1;
+            return false;
         }
 
         const int fxaaTier = std::max(
@@ -419,11 +582,20 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
         // The panel makes these mutually exclusive. If an external caller ever
         // enables both, prefer SMAA so there is still exactly one AA pass.
         const bool useSmaa =
-            !g_proofTint && smaaEnabled;
+            !depthProof &&
+            !g_proofTint &&
+            smaaEnabled;
 
         IDirect3DPixelShader9* shader = nullptr;
 
-        if (g_proofTint)
+        if (depthProof)
+        {
+            if (!EnsureDepthProofShader(device))
+                return false;
+
+            shader = g_depthProofShader;
+        }
+        else if (g_proofTint)
         {
             if (!EnsureProofShader(device))
                 return false;
@@ -470,6 +642,20 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
 
         device->GetDepthStencilSurface(&oldDepth);
 
+        if (depthProof &&
+            (!oldDepth ||
+             !EnsureDepthTarget(device, oldDepth)))
+        {
+            WLOG_ERROR(
+                "wxl-modern-d3d9: R3D1 depth target unavailable");
+
+            SafeRelease(state);
+            SafeRelease(oldRt);
+            SafeRelease(oldDepth);
+            backbuffer->Release();
+            return false;
+        }
+
         // StretchRect cannot execute inside BeginScene/EndScene. Call the
         // original EndScene target directly so the ImGui/UI hook is not emitted
         // in the middle of this world-only post-process.
@@ -499,11 +685,29 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             g_sceneSurface, nullptr,
             D3DTEXF_NONE);
 
-        // R3D0B: while outside BeginScene/EndScene, test whether this
-        // translation layer exposes any usable depth-transfer path. The
-        // source world depth is read-only and all destinations are private.
-        d3d9depthprobe::ProbeTransfersOnce(
-            device, oldDepth);
+        HRESULT depthStretchHr = S_OK;
+
+        if (depthProof)
+        {
+            depthStretchHr = device->StretchRect(
+                oldDepth,
+                nullptr,
+                g_depthSurface,
+                nullptr,
+                D3DTEXF_NONE);
+
+            if (SUCCEEDED(depthStretchHr) &&
+                !g_loggedDepthCopyPass)
+            {
+                g_loggedDepthCopyPass = true;
+
+                WLOG_INFO(
+                    "wxl-modern-d3d9: R3D1 depth-copy PASS "
+                    "%ux%u sourceMSAA=8 -> INTZ",
+                    g_depthWidth,
+                    g_depthHeight);
+            }
+        }
 
         // WoW still needs an open scene for the remaining UI work this frame.
         const HRESULT beginHr = device->BeginScene();
@@ -518,6 +722,28 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                     "hr=0x%08X",
                     static_cast<unsigned>(beginHr));
             }
+
+            SafeRelease(state);
+            SafeRelease(oldRt);
+            SafeRelease(oldDepth);
+            backbuffer->Release();
+            return false;
+        }
+
+        if (depthProof && FAILED(depthStretchHr))
+        {
+            if (!g_loggedDepthStretchFail)
+            {
+                g_loggedDepthStretchFail = true;
+
+                WLOG_ERROR(
+                    "wxl-modern-d3d9: R3D1 depth StretchRect "
+                    "failed hr=0x%08X",
+                    static_cast<unsigned>(depthStretchHr));
+            }
+
+            RestoreDeviceState(
+                device, state, oldRt, oldDepth, oldViewport);
 
             SafeRelease(state);
             SafeRelease(oldRt);
@@ -556,6 +782,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             const char* name =
                 mode == 0 ? "proof-tint" :
                 mode == 2 ? "SMAA" :
+                mode == 3 ? "depth-proof" :
                             "FXAA";
 
             WLOG_INFO(
@@ -634,15 +861,30 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             D3DCOLORWRITEENABLE_BLUE |
             D3DCOLORWRITEENABLE_ALPHA);
 
-        device->SetTexture(0, g_sceneTexture);
+        device->SetTexture(
+            0,
+            depthProof
+                ? static_cast<IDirect3DBaseTexture9*>(g_depthTexture)
+                : static_cast<IDirect3DBaseTexture9*>(g_sceneTexture));
+
         device->SetSamplerState(
             0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
         device->SetSamplerState(
             0, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
         device->SetSamplerState(
-            0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
+            0,
+            D3DSAMP_MINFILTER,
+            depthProof ? D3DTEXF_POINT : D3DTEXF_LINEAR);
+
         device->SetSamplerState(
-            0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
+            0,
+            D3DSAMP_MAGFILTER,
+            depthProof ? D3DTEXF_POINT : D3DTEXF_LINEAR);
+
+        device->SetSamplerState(
+            0,
+            D3DSAMP_SRGBTEXTURE,
+            FALSE);
         device->SetSamplerState(
             0, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
 
@@ -690,8 +932,9 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
         if (SUCCEEDED(drawHr))
         {
             logPass(
+                depthProof ? 3 :
                 g_proofTint ? 0 : 1,
-                fxaaTier);
+                depthProof ? 0 : fxaaTier);
         }
 
         SafeRelease(state);
