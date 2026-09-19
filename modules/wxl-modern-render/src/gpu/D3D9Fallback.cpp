@@ -499,6 +499,12 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             g_sceneSurface, nullptr,
             D3DTEXF_NONE);
 
+        // R3D0B: while outside BeginScene/EndScene, test whether this
+        // translation layer exposes any usable depth-transfer path. The
+        // source world depth is read-only and all destinations are private.
+        d3d9depthprobe::ProbeTransfersOnce(
+            device, oldDepth);
+
         // WoW still needs an open scene for the remaining UI work this frame.
         const HRESULT beginHr = device->BeginScene();
 

@@ -1,13 +1,18 @@
 #pragma once
 
 struct IDirect3DDevice9;
+struct IDirect3DSurface9;
 
 namespace wxl::scripts::render_modern::d3d9depthprobe
 {
-    // One-shot diagnostic of the live Proton D3D9 device's readable-depth
-    // capabilities. This does not modify the render path.
+    // Capability-only probe. Does not modify the frame.
     void ProbeOnce(IDirect3DDevice9* device);
 
-    // Allows a fresh probe after a device reset/recreation.
+    // Runs after the engine scene has been ended, while D3D9 copy operations
+    // are legal. All destinations are private temporary resources; the bound
+    // world depth buffer is read-only.
+    void ProbeTransfersOnce(IDirect3DDevice9* device,
+                            IDirect3DSurface9* boundDepth);
+
     void Reset();
 }
