@@ -116,7 +116,7 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 4)
     target_include_directories(WarcraftXL PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/modules/wxl-modern-render/src")
 
-    target_link_libraries(WarcraftXL PRIVATE d3d12)
+    target_link_libraries(WarcraftXL PRIVATE d3d12 d3dcompiler)
     # --- end GFX-R2 locked modern-render passthrough -----------------------------
 
     source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" FILES ${WXL_CORE_SRC})
