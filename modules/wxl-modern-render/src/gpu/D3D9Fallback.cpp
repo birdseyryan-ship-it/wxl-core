@@ -17,6 +17,7 @@
 #include "client/CWorldScene/RenderModernBridge.hpp"
 #include "common/Log.hpp"
 #include "gpu/D3D9Smaa.hpp"
+#include "gpu/D3D9DepthProbe.hpp"
 
 #include "../../vendor/fxaa/Fxaa3_11_embed.hpp"
 
@@ -85,6 +86,8 @@ namespace wxl::scripts::render_modern::d3d9fallback
             SafeRelease(g_proofShader);
             for (auto*& p : g_fxaaShader)
                 SafeRelease(p);
+
+            d3d9depthprobe::Reset();
             g_device = nullptr;
 
             g_lastLoggedMode = -1;
@@ -387,6 +390,10 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
     {
         if (!Available() || !device)
             return false;
+
+        // R3D0 is diagnostic only: inspect the actual live depth surface and
+        // driver FourCC support once without changing the rendered frame.
+        d3d9depthprobe::ProbeOnce(device);
 
         if (!g_proofTint && !fxaaEnabled && !smaaEnabled)
         {
