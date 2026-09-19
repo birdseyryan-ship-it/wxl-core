@@ -16,6 +16,7 @@
 
 #include "client/CWorldScene/RenderModernBridge.hpp"
 #include "common/Log.hpp"
+#include "gpu/D3D9Smaa.hpp"
 
 #include "../../vendor/fxaa/Fxaa3_11_embed.hpp"
 
@@ -52,7 +53,8 @@ namespace wxl::scripts::render_modern::d3d9fallback
         D3DFORMAT g_format = D3DFMT_UNKNOWN;
 
         bool g_proofTint = false;
-        bool g_loggedActive = false;
+        int  g_lastLoggedMode = -1;
+        int  g_lastLoggedTier = -1;
         bool g_loggedEndFail = false;
         bool g_loggedStretchFail = false;
         bool g_loggedBeginFail = false;
@@ -78,12 +80,15 @@ namespace wxl::scripts::render_modern::d3d9fallback
         void ReleaseRuntime()
         {
             ReleaseTarget();
+            d3d9smaa::PrepareForReset();
+
             SafeRelease(g_proofShader);
             for (auto*& p : g_fxaaShader)
                 SafeRelease(p);
             g_device = nullptr;
 
-            g_loggedActive = false;
+            g_lastLoggedMode = -1;
+            g_lastLoggedTier = -1;
             g_loggedEndFail = false;
             g_loggedStretchFail = false;
             g_loggedBeginFail = false;
@@ -376,13 +381,19 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
 
     bool Frame(IDirect3DDevice9* device,
                bool fxaaEnabled,
-               Quality quality)
+               Quality fxaaQuality,
+               bool smaaEnabled,
+               Quality smaaQuality)
     {
         if (!Available() || !device)
             return false;
 
-        if (!g_proofTint && !fxaaEnabled)
+        if (!g_proofTint && !fxaaEnabled && !smaaEnabled)
+        {
+            g_lastLoggedMode = -1;
+            g_lastLoggedTier = -1;
             return false;
+        }
 
         if (g_device != device)
         {
@@ -392,8 +403,16 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                 "wxl-modern-d3d9: Proton/Wine fallback backend active");
         }
 
-        const int tier = std::max(
-            0, std::min(2, static_cast<int>(quality)));
+        const int fxaaTier = std::max(
+            0, std::min(2, static_cast<int>(fxaaQuality)));
+
+        const int smaaTier = std::max(
+            0, std::min(2, static_cast<int>(smaaQuality)));
+
+        // The panel makes these mutually exclusive. If an external caller ever
+        // enables both, prefer SMAA so there is still exactly one AA pass.
+        const bool useSmaa =
+            !g_proofTint && smaaEnabled;
 
         IDirect3DPixelShader9* shader = nullptr;
 
@@ -403,11 +422,11 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                 return false;
             shader = g_proofShader;
         }
-        else
+        else if (!useSmaa)
         {
-            if (!EnsureFxaaShader(device, tier))
+            if (!EnsureFxaaShader(device, fxaaTier))
                 return false;
-            shader = g_fxaaShader[tier];
+            shader = g_fxaaShader[fxaaTier];
         }
 
         IDirect3DSurface9* backbuffer = nullptr;
@@ -442,13 +461,11 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             return false;
         }
 
-        // No depth surface is a legal state, so failure here simply leaves
-        // oldDepth null.
         device->GetDepthStencilSurface(&oldDepth);
 
         // StretchRect cannot execute inside BeginScene/EndScene. Call the
-        // original EndScene entry directly so the core's EndScene hook does
-        // not emit OnEndScene/ImGui in the middle of this world-only pass.
+        // original EndScene target directly so the ImGui/UI hook is not emitted
+        // in the middle of this world-only post-process.
         hr = static_cast<HRESULT>(
             wxl::runtime::render::EndSceneForPostProcess(device));
 
@@ -475,9 +492,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             g_sceneSurface, nullptr,
             D3DTEXF_NONE);
 
-        // Open a new scene immediately, even if the resolve failed. The WoW
-        // render path still expects to draw its UI and issue its normal final
-        // EndScene later in the frame.
+        // WoW still needs an open scene for the remaining UI work this frame.
         const HRESULT beginHr = device->BeginScene();
 
         if (FAILED(beginHr))
@@ -519,6 +534,62 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             return false;
         }
 
+        auto logPass = [&](int mode, int tier)
+        {
+            if (g_lastLoggedMode == mode &&
+                g_lastLoggedTier == tier)
+                return;
+
+            const char* name =
+                mode == 0 ? "proof-tint" :
+                mode == 2 ? "SMAA" :
+                            "FXAA";
+
+            WLOG_INFO(
+                "wxl-modern-d3d9: post-process frame PASS "
+                "%ux%u sourceMSAA=%u mode=%s tier=%d",
+                bbDesc.Width,
+                bbDesc.Height,
+                static_cast<unsigned>(bbDesc.MultiSampleType),
+                name,
+                tier);
+
+            g_lastLoggedMode = mode;
+            g_lastLoggedTier = tier;
+        };
+
+        // ------------------------------------------------------------
+        // SMAA: three-pass native D3D9 implementation.
+        // ------------------------------------------------------------
+
+        if (useSmaa)
+        {
+            const bool ok = d3d9smaa::Render(
+                device,
+                g_sceneTexture,
+                backbuffer,
+                bbDesc.Width,
+                bbDesc.Height,
+                smaaQuality);
+
+            RestoreDeviceState(
+                device, state, oldRt, oldDepth, oldViewport);
+
+            if (ok)
+                logPass(2, smaaTier);
+
+            SafeRelease(state);
+            SafeRelease(oldRt);
+            SafeRelease(oldDepth);
+            backbuffer->Release();
+
+            return ok;
+        }
+
+        // ------------------------------------------------------------
+        // Existing one-pass proof tint / FXAA path.
+        // ------------------------------------------------------------
+
         D3DVIEWPORT9 vp = {};
         vp.X = 0;
         vp.Y = 0;
@@ -551,11 +622,16 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             D3DCOLORWRITEENABLE_ALPHA);
 
         device->SetTexture(0, g_sceneTexture);
-        device->SetSamplerState(0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
-        device->SetSamplerState(0, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
-        device->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
-        device->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
-        device->SetSamplerState(0, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
+        device->SetSamplerState(
+            0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+        device->SetSamplerState(
+            0, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+        device->SetSamplerState(
+            0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
+        device->SetSamplerState(
+            0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
+        device->SetSamplerState(
+            0, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
 
         const float rcpFrame[4] = {
             1.0f / static_cast<float>(bbDesc.Width),
@@ -563,18 +639,20 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             0.0f,
             0.0f
         };
-        device->SetPixelShaderConstantF(0, rcpFrame, 1);
 
-        const float w = static_cast<float>(bbDesc.Width);
-        const float h = static_cast<float>(bbDesc.Height);
+        device->SetPixelShaderConstantF(
+            0, rcpFrame, 1);
 
-        // D3D9's half-pixel convention: -0.5 aligns the transformed quad
-        // exactly with pixel centres for a 1:1 fullscreen pass.
+        const float w =
+            static_cast<float>(bbDesc.Width);
+        const float h =
+            static_cast<float>(bbDesc.Height);
+
         const FsVertex quad[4] = {
-            { -0.5f,     -0.5f,     0.0f, 1.0f, 0.0f, 0.0f },
-            { w - 0.5f,  -0.5f,     0.0f, 1.0f, 1.0f, 0.0f },
-            { -0.5f,      h - 0.5f, 0.0f, 1.0f, 0.0f, 1.0f },
-            { w - 0.5f,   h - 0.5f, 0.0f, 1.0f, 1.0f, 1.0f },
+            { -0.5f,    -0.5f,    0.0f, 1.0f, 0.0f, 0.0f },
+            { w - 0.5f, -0.5f,    0.0f, 1.0f, 1.0f, 0.0f },
+            { -0.5f,     h - 0.5f,0.0f, 1.0f, 0.0f, 1.0f },
+            { w - 0.5f,  h - 0.5f,0.0f, 1.0f, 1.0f, 1.0f },
         };
 
         const HRESULT drawHr = device->DrawPrimitiveUP(
@@ -596,17 +674,11 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                 static_cast<unsigned>(drawHr));
         }
 
-        if (SUCCEEDED(drawHr) && !g_loggedActive)
+        if (SUCCEEDED(drawHr))
         {
-            g_loggedActive = true;
-            WLOG_INFO(
-                "wxl-modern-d3d9: post-process frame PASS "
-                "%ux%u sourceMSAA=%u mode=%s tier=%d",
-                bbDesc.Width,
-                bbDesc.Height,
-                static_cast<unsigned>(bbDesc.MultiSampleType),
-                g_proofTint ? "proof-tint" : "FXAA",
-                tier);
+            logPass(
+                g_proofTint ? 0 : 1,
+                fxaaTier);
         }
 
         SafeRelease(state);

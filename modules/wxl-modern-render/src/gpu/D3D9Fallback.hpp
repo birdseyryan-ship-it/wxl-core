@@ -17,7 +17,12 @@ namespace wxl::scripts::render_modern::d3d9fallback
     // Releases D3DPOOL_DEFAULT resources before a D3D9 device reset.
     void PrepareForReset();
 
-    // Runs the Proton colour post-process. ProofTint takes precedence over FXAA.
-    // Returns true when a post-process frame was successfully submitted.
-    bool Frame(IDirect3DDevice9* device, bool fxaaEnabled, Quality quality);
+    // Runs the Proton colour post-process.
+    // Precedence: ProofTint -> SMAA -> FXAA.
+    // FXAA/SMAA are normally mutually exclusive via the overlay.
+    bool Frame(IDirect3DDevice9* device,
+               bool fxaaEnabled,
+               Quality fxaaQuality,
+               bool smaaEnabled,
+               Quality smaaQuality);
 }

@@ -99,7 +99,9 @@ namespace wxl::scripts::render_modern
                 wxl::runtime::render::SetReadableDepthNeeded(false);
 
                 bool fxaaEnabled = false;
+                bool smaaEnabled = false;
                 Quality fxaaQuality = Quality::Medium;
+                Quality smaaQuality = Quality::Medium;
 
                 for (const auto& e : Pipeline::Get().Effects())
                 {
@@ -107,11 +109,20 @@ namespace wxl::scripts::render_modern
                     {
                         fxaaEnabled = e->Enabled();
                         fxaaQuality = e->GetQuality();
-                        break;
+                    }
+                    else if (std::strcmp(e->Name(), "SMAA") == 0)
+                    {
+                        smaaEnabled = e->Enabled();
+                        smaaQuality = e->GetQuality();
                     }
                 }
 
-                d3d9fallback::Frame(device, fxaaEnabled, fxaaQuality);
+                d3d9fallback::Frame(
+                    device,
+                    fxaaEnabled,
+                    fxaaQuality,
+                    smaaEnabled,
+                    smaaQuality);
                 return;
             }
 

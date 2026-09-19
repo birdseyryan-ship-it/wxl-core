@@ -56,7 +56,7 @@ namespace wxl::scripts::render_modern
                 if (proof)
                     ImGui::TextColored(
                         ImVec4(1.0f, 0.7f, 0.3f, 1.0f),
-                        "Diagnostic tint active; FXAA is temporarily bypassed.");
+                        "Diagnostic tint active; FXAA/SMAA are temporarily bypassed.");
 
                 ImGui::TextDisabled(
                     "Engine MSAA is resolved to a single-sample world image before post-FX.");
@@ -76,12 +76,14 @@ namespace wxl::scripts::render_modern
                 // until the readable-depth/world redirect is implemented and proven.
                 if (e->NeedsDepth()) continue;
 
-                // R3B intentionally ports only FXAA first. SMAA comes after the
-                // fallback frame path itself is proven; CMAA2 is a later backend
-                // decision because its current implementation is D3D12 compute/UAV.
-                if (protonFallback && std::strcmp(e->Name(), "FXAA") != 0)
+                // R3C exposes the two colour AA methods now implemented on
+                // Proton: FXAA and SMAA. CMAA2 remains D3D12 compute/UAV only.
+                if (protonFallback &&
+                    std::strcmp(e->Name(), "FXAA") != 0 &&
+                    std::strcmp(e->Name(), "SMAA") != 0)
                 {
-                    ImGui::TextDisabled("%s (pending Proton backend port)", e->Name());
+                    ImGui::TextDisabled(
+                        "%s (pending Proton backend port)", e->Name());
                     continue;
                 }
 
@@ -119,7 +121,7 @@ namespace wxl::scripts::render_modern
             ImGui::Separator();
             if (protonFallback)
                 ImGui::TextDisabled(
-                    "R3B: SMAA/CMAA2, SSAO and Render Scale remain locked.");
+                    "R3C: CMAA2, SSAO and Render Scale remain locked.");
             else
                 ImGui::TextDisabled(
                     "R3: SSAO and Render Scale locked pending readable-depth validation.");
