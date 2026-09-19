@@ -46,6 +46,7 @@ namespace wxl::scripts::render_modern
     public:
         RenderModernModule()
         {
+            on<&RenderModernModule::OnWorldSceneEnd>(ev::Event::OnWorldSceneEnd);
             on<&RenderModernModule::OnWorldRenderEnd>(ev::Event::OnWorldRenderEnd);
             on<&RenderModernModule::OnDeviceLost>(ev::Event::OnDeviceLost);
             WLOG_INFO("wxl-render-modern: loaded (D3D12 post-process pipeline)");
@@ -55,8 +56,39 @@ namespace wxl::scripts::render_modern
         IDirect3DDevice9On12* on12_ = nullptr;
         IDirect3DDevice9*     dev9_  = nullptr;
 
+        // R3D1A: the core captures this BEFORE the world pass, so this is
+        // the depth-stencil surface the world genuinely wrote into.
+        IDirect3DSurface9* protonWorldDepth_ = nullptr;
+
+        void ReleaseProtonWorldDepth()
+        {
+            if (protonWorldDepth_)
+            {
+                protonWorldDepth_->Release();
+                protonWorldDepth_ = nullptr;
+            }
+        }
+
+        void OnWorldSceneEnd(const ev::WorldSceneEndArgs& a)
+        {
+            if (!d3d9fallback::Available())
+                return;
+
+            IDirect3DSurface9* depth =
+                static_cast<IDirect3DSurface9*>(a.sceneDepth);
+
+            // Hold the exact per-frame world depth until the later
+            // world->UI post-process boundary.
+            if (depth)
+                depth->AddRef();
+
+            ReleaseProtonWorldDepth();
+            protonWorldDepth_ = depth;
+        }
+
         void OnDeviceLost(const ev::DeviceResetArgs&)
         {
+            ReleaseProtonWorldDepth();
             d3d9fallback::PrepareForReset();
             Pipeline::Get().PrepareForReset();
         }
@@ -117,12 +149,25 @@ namespace wxl::scripts::render_modern
                     }
                 }
 
+                // Consume the exact depth surface captured around the
+                // actual world scene pass. Do not query whichever depth
+                // surface happens to be bound at this later boundary.
+                IDirect3DSurface9* frameWorldDepth =
+                    protonWorldDepth_;
+
+                protonWorldDepth_ = nullptr;
+
                 d3d9fallback::Frame(
                     device,
                     fxaaEnabled,
                     fxaaQuality,
                     smaaEnabled,
-                    smaaQuality);
+                    smaaQuality,
+                    frameWorldDepth);
+
+                if (frameWorldDepth)
+                    frameWorldDepth->Release();
+
                 return;
             }
 

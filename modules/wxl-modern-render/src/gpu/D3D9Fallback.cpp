@@ -71,6 +71,7 @@ namespace wxl::scripts::render_modern::d3d9fallback
         bool g_loggedDrawFail = false;
         bool g_loggedDepthStretchFail = false;
         bool g_loggedDepthCopyPass = false;
+        bool g_loggedCapturedDepth = false;
 
         struct FsVertex
         {
@@ -145,6 +146,7 @@ namespace wxl::scripts::render_modern::d3d9fallback
             g_loggedDrawFail = false;
             g_loggedDepthStretchFail = false;
             g_loggedDepthCopyPass = false;
+            g_loggedCapturedDepth = false;
         }
 
         bool CompilePixelShader(IDirect3DDevice9* dev,
@@ -544,7 +546,8 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                bool fxaaEnabled,
                Quality fxaaQuality,
                bool smaaEnabled,
-               Quality smaaQuality)
+               Quality smaaQuality,
+               IDirect3DSurface9* worldDepth)
     {
         if (!Available() || !device)
             return false;
@@ -642,9 +645,35 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
 
         device->GetDepthStencilSurface(&oldDepth);
 
+        // oldDepth is only the state we must restore later. The actual world
+        // depth comes from OnWorldSceneEnd, where the core captured it before
+        // the world pass began.
+        IDirect3DSurface9* depthSource =
+            worldDepth ? worldDepth : oldDepth;
+
         if (depthProof &&
-            (!oldDepth ||
-             !EnsureDepthTarget(device, oldDepth)))
+            worldDepth &&
+            !g_loggedCapturedDepth)
+        {
+            D3DSURFACE_DESC d = {};
+
+            if (SUCCEEDED(worldDepth->GetDesc(&d)))
+            {
+                WLOG_INFO(
+                    "wxl-modern-d3d9: R3D1A captured world-depth "
+                    "%ux%u fmt=%u sourceMSAA=%u",
+                    d.Width,
+                    d.Height,
+                    static_cast<unsigned>(d.Format),
+                    static_cast<unsigned>(d.MultiSampleType));
+
+                g_loggedCapturedDepth = true;
+            }
+        }
+
+        if (depthProof &&
+            (!depthSource ||
+             !EnsureDepthTarget(device, depthSource)))
         {
             WLOG_ERROR(
                 "wxl-modern-d3d9: R3D1 depth target unavailable");
@@ -690,7 +719,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
         if (depthProof)
         {
             depthStretchHr = device->StretchRect(
-                oldDepth,
+                depthSource,
                 nullptr,
                 g_depthSurface,
                 nullptr,

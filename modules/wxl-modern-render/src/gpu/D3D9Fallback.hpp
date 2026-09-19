@@ -3,6 +3,7 @@
 #include "gpu/Effect.hpp"
 
 struct IDirect3DDevice9;
+struct IDirect3DSurface9;
 
 namespace wxl::scripts::render_modern::d3d9fallback
 {
@@ -24,5 +25,6 @@ namespace wxl::scripts::render_modern::d3d9fallback
                bool fxaaEnabled,
                Quality fxaaQuality,
                bool smaaEnabled,
-               Quality smaaQuality);
+               Quality smaaQuality,
+               IDirect3DSurface9* worldDepth);
 }
