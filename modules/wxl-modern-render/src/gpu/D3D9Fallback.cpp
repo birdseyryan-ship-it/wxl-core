@@ -284,7 +284,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             // mode 3 = direct world-depth copy, 1-depth
             // mode 4 = direct world-depth copy, expanded far-depth detail
             // mode 5 = two-stage copy, expanded far-depth detail
-            // mode 6 = legacy R3D1 visualization
+            // mode 6 = two-stage copy, graded nonlinear depth proof
             static const char* kDepthProofPs = R"HLSL(
 sampler2D depthTex : register(s0);
 float4 proofMode : register(c1);
@@ -907,7 +907,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
 
         if (depthProof && depthMode != 1)
         {
-            if (depthMode == 5)
+            if (depthMode == 5 || depthMode == 6)
             {
                 const HRESULT stage1 =
                     device->StretchRect(
@@ -1063,7 +1063,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                 mode == 5 ? "depth-invert" :
                 mode == 6 ? "depth-expand" :
                 mode == 7 ? "depth-two-stage" :
-                mode == 8 ? "depth-legacy" :
+                mode == 8 ? "depth-two-stage-graded" :
                             "FXAA";
 
             WLOG_INFO(
