@@ -73,6 +73,7 @@ namespace wxl::scripts::render_modern::d3d9smaa
         unsigned g_height = 0;
 
         bool g_loggedFrame[3] = { false, false, false };
+        bool g_loggedShaders[3] = { false, false, false };
 
         void ReleaseTargets()
         {
@@ -107,6 +108,9 @@ namespace wxl::scripts::render_modern::d3d9smaa
             g_device = nullptr;
 
             for (bool& b : g_loggedFrame)
+                b = false;
+
+            for (bool& b : g_loggedShaders)
                 b = false;
         }
 
@@ -496,9 +500,13 @@ float4 main(float2 texcoord : TEXCOORD0,
                     return false;
             }
 
-            WLOG_INFO(
-                "wxl-modern-d3d9: SMAA shaders ready (tier=%d)",
-                tier);
+            if (!g_loggedShaders[tier])
+            {
+                g_loggedShaders[tier] = true;
+                WLOG_INFO(
+                    "wxl-modern-d3d9: SMAA shaders ready (tier=%d)",
+                    tier);
+            }
 
             return true;
         }
