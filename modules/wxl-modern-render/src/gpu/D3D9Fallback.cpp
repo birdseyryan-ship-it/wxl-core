@@ -51,6 +51,10 @@ namespace wxl::scripts::render_modern::d3d9fallback
         IDirect3DTexture9*     g_depthTexture = nullptr;
         IDirect3DSurface9*     g_depthSurface = nullptr;
 
+        // R3D2 mode 5: explicit two-stage resolve path
+        // MSAA D24X8 -> single-sample D24X8 -> INTZ.
+        IDirect3DSurface9*     g_depthPlainSurface = nullptr;
+
         IDirect3DPixelShader9* g_proofShader = nullptr;
         IDirect3DPixelShader9* g_depthProofShader = nullptr;
         IDirect3DPixelShader9* g_fxaaShader[3] = { nullptr, nullptr, nullptr };
@@ -72,6 +76,8 @@ namespace wxl::scripts::render_modern::d3d9fallback
         bool g_loggedDepthStretchFail = false;
         bool g_loggedDepthCopyPass = false;
         bool g_loggedCapturedDepth = false;
+        bool g_loggedDepthSelfTest = false;
+        bool g_loggedDepthMode = false;
 
         struct FsVertex
         {
@@ -85,27 +91,51 @@ namespace wxl::scripts::render_modern::d3d9fallback
             static_cast<D3DFORMAT>(
                 MAKEFOURCC('I', 'N', 'T', 'Z'));
 
-        bool DepthProofEnabled()
+        int DepthProofMode()
         {
-            static const bool enabled = []()
+            static const int mode = []()
             {
-                char value[16] = {};
-                const DWORD n = GetEnvironmentVariableA(
-                    "WXL_DEPTH_PROOF",
-                    value,
-                    sizeof(value));
+                char modeValue[16] = {};
 
-                if (!n || n >= sizeof(value))
-                    return false;
+                const DWORD modeLen =
+                    GetEnvironmentVariableA(
+                        "WXL_DEPTH_PROOF_MODE",
+                        modeValue,
+                        sizeof(modeValue));
 
-                const char c = value[0];
+                if (modeLen > 0 &&
+                    modeLen < sizeof(modeValue) &&
+                    modeValue[0] >= '1' &&
+                    modeValue[0] <= '5')
+                {
+                    return static_cast<int>(
+                        modeValue[0] - '0');
+                }
 
-                return c != '0' &&
-                       c != 'n' && c != 'N' &&
-                       c != 'f' && c != 'F';
+                // Preserve the old diagnostic switch as legacy mode 6.
+                char legacy[16] = {};
+
+                const DWORD legacyLen =
+                    GetEnvironmentVariableA(
+                        "WXL_DEPTH_PROOF",
+                        legacy,
+                        sizeof(legacy));
+
+                if (legacyLen > 0 &&
+                    legacyLen < sizeof(legacy))
+                {
+                    const char c = legacy[0];
+
+                    if (c != '0' &&
+                        c != 'n' && c != 'N' &&
+                        c != 'f' && c != 'F')
+                        return 6;
+                }
+
+                return 0;
             }();
 
-            return enabled;
+            return mode;
         }
 
         void ReleaseTarget()
@@ -113,6 +143,7 @@ namespace wxl::scripts::render_modern::d3d9fallback
             SafeRelease(g_sceneSurface);
             SafeRelease(g_sceneTexture);
 
+            SafeRelease(g_depthPlainSurface);
             SafeRelease(g_depthSurface);
             SafeRelease(g_depthTexture);
 
@@ -147,6 +178,8 @@ namespace wxl::scripts::render_modern::d3d9fallback
             g_loggedDepthStretchFail = false;
             g_loggedDepthCopyPass = false;
             g_loggedCapturedDepth = false;
+            g_loggedDepthSelfTest = false;
+            g_loggedDepthMode = false;
         }
 
         bool CompilePixelShader(IDirect3DDevice9* dev,
@@ -244,17 +277,40 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             if (g_depthProofShader)
                 return true;
 
-            // D3D depth is strongly non-linear. 1-depth is approximately
-            // proportional to near/z, so the fourth root expands the useful
-            // near/mid-distance range for an easily inspected grayscale proof.
+            // R3D2 INTZ truth-test shader.
+            //
+            // mode 1 = INTZ self-test, raw value
+            // mode 2 = direct world-depth copy, raw value
+            // mode 3 = direct world-depth copy, 1-depth
+            // mode 4 = direct world-depth copy, expanded far-depth detail
+            // mode 5 = two-stage copy, expanded far-depth detail
+            // mode 6 = legacy R3D1 visualization
             static const char* kDepthProofPs = R"HLSL(
 sampler2D depthTex : register(s0);
+float4 proofMode : register(c1);
 
 float4 main(float2 uv : TEXCOORD0) : COLOR0
 {
     float d = tex2D(depthTex, uv).r;
-    float proximity = saturate(1.0 - d);
-    float v = pow(proximity, 0.25);
+    float mode = proofMode.x;
+    float v = d;
+
+    if (mode >= 2.5 && mode < 3.5)
+    {
+        v = 1.0 - d;
+    }
+    else if (mode >= 3.5 && mode < 5.5)
+    {
+        // Standard D3D depth spends most precision close to 1. Expand
+        // the tiny (1-depth) range aggressively so real structure cannot
+        // hide in an almost-white raw image.
+        v = saturate((1.0 - d) * 4096.0);
+    }
+    else if (mode >= 5.5)
+    {
+        v = pow(saturate(1.0 - d), 0.25);
+    }
+
     return float4(v, v, v, 1.0);
 }
 )HLSL";
@@ -262,12 +318,12 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             if (!CompilePixelShader(
                     dev,
                     kDepthProofPs,
-                    "R3D1 INTZ depth proof",
+                    "R3D2 INTZ truth test",
                     &g_depthProofShader))
                 return false;
 
             WLOG_INFO(
-                "wxl-modern-d3d9: R3D1 depth-proof shader ready");
+                "wxl-modern-d3d9: R3D2 INTZ truth-test shader ready");
 
             return true;
         }
@@ -285,10 +341,12 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
 
             if (g_depthTexture &&
                 g_depthSurface &&
+                g_depthPlainSurface &&
                 g_depthWidth == desc.Width &&
                 g_depthHeight == desc.Height)
                 return true;
 
+            SafeRelease(g_depthPlainSurface);
             SafeRelease(g_depthSurface);
             SafeRelease(g_depthTexture);
 
@@ -334,11 +392,37 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                 return false;
             }
 
+            hr = dev->CreateDepthStencilSurface(
+                desc.Width,
+                desc.Height,
+                desc.Format,
+                D3DMULTISAMPLE_NONE,
+                0,
+                FALSE,
+                &g_depthPlainSurface,
+                nullptr);
+
+            if (FAILED(hr) || !g_depthPlainSurface)
+            {
+                WLOG_ERROR(
+                    "wxl-modern-d3d9: R3D2 plain D24X8 target "
+                    "creation failed %ux%u fmt=%u hr=0x%08X",
+                    desc.Width,
+                    desc.Height,
+                    static_cast<unsigned>(desc.Format),
+                    static_cast<unsigned>(hr));
+
+                SafeRelease(g_depthPlainSurface);
+                SafeRelease(g_depthSurface);
+                SafeRelease(g_depthTexture);
+                return false;
+            }
+
             g_depthWidth = desc.Width;
             g_depthHeight = desc.Height;
 
             WLOG_INFO(
-                "wxl-modern-d3d9: R3D1 INTZ target ready "
+                "wxl-modern-d3d9: R3D2 depth targets ready "
                 "%ux%u sourceFmt=%u sourceMSAA=%u",
                 desc.Width,
                 desc.Height,
@@ -346,6 +430,101 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                 static_cast<unsigned>(desc.MultiSampleType));
 
             return true;
+        }
+
+        bool RunIntzSelfTest(IDirect3DDevice9* dev)
+        {
+            if (!dev ||
+                !g_sceneSurface ||
+                !g_depthSurface ||
+                !g_depthWidth ||
+                !g_depthHeight)
+                return false;
+
+            // INTZ must be bound as the depth-stencil surface to populate it.
+            // Pair it with our already-existing single-sample colour RT so the
+            // target/depth multisample contracts match.
+            dev->SetTexture(0, nullptr);
+
+            const HRESULT rtHr =
+                dev->SetRenderTarget(
+                    0,
+                    g_sceneSurface);
+
+            const HRESULT dsHr =
+                dev->SetDepthStencilSurface(
+                    g_depthSurface);
+
+            if (FAILED(rtHr) || FAILED(dsHr))
+            {
+                WLOG_ERROR(
+                    "wxl-modern-d3d9: R3D2 INTZ self-test bind "
+                    "FAIL rt=0x%08X depth=0x%08X",
+                    static_cast<unsigned>(rtHr),
+                    static_cast<unsigned>(dsHr));
+                return false;
+            }
+
+            const LONG w =
+                static_cast<LONG>(g_depthWidth);
+
+            const LONG h =
+                static_cast<LONG>(g_depthHeight);
+
+            const LONG x1 = w / 3;
+            const LONG x2 = (w * 2) / 3;
+
+            const D3DRECT left  = { 0,  0, x1, h };
+            const D3DRECT mid   = { x1, 0, x2, h };
+            const D3DRECT right = { x2, 0, w,  h };
+
+            const HRESULT a =
+                dev->Clear(
+                    1,
+                    &left,
+                    D3DCLEAR_ZBUFFER,
+                    0,
+                    0.10f,
+                    0);
+
+            const HRESULT b =
+                dev->Clear(
+                    1,
+                    &mid,
+                    D3DCLEAR_ZBUFFER,
+                    0,
+                    0.50f,
+                    0);
+
+            const HRESULT c =
+                dev->Clear(
+                    1,
+                    &right,
+                    D3DCLEAR_ZBUFFER,
+                    0,
+                    0.90f,
+                    0);
+
+            const bool ok =
+                SUCCEEDED(a) &&
+                SUCCEEDED(b) &&
+                SUCCEEDED(c);
+
+            if (!g_loggedDepthSelfTest)
+            {
+                g_loggedDepthSelfTest = true;
+
+                WLOG_INFO(
+                    "wxl-modern-d3d9: R3D2 INTZ self-test "
+                    "%s z=[0.10,0.50,0.90] "
+                    "hr=[0x%08X,0x%08X,0x%08X]",
+                    ok ? "PASS" : "FAIL",
+                    static_cast<unsigned>(a),
+                    static_cast<unsigned>(b),
+                    static_cast<unsigned>(c));
+            }
+
+            return ok;
         }
 
         std::string BuildFxaaSource(int tier)
@@ -564,7 +743,17 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
         // device-change reset so it runs only once per live device.
         d3d9depthprobe::ProbeOnce(device);
 
-        const bool depthProof = DepthProofEnabled();
+        const int depthMode = DepthProofMode();
+        const bool depthProof = depthMode > 0;
+
+        if (depthProof && !g_loggedDepthMode)
+        {
+            g_loggedDepthMode = true;
+
+            WLOG_INFO(
+                "wxl-modern-d3d9: R3D2 depth-proof mode=%d",
+                depthMode);
+        }
 
         if (!depthProof &&
             !g_proofTint &&
@@ -716,25 +905,69 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
 
         HRESULT depthStretchHr = S_OK;
 
-        if (depthProof)
+        if (depthProof && depthMode != 1)
         {
-            depthStretchHr = device->StretchRect(
-                depthSource,
-                nullptr,
-                g_depthSurface,
-                nullptr,
-                D3DTEXF_NONE);
-
-            if (SUCCEEDED(depthStretchHr) &&
-                !g_loggedDepthCopyPass)
+            if (depthMode == 5)
             {
-                g_loggedDepthCopyPass = true;
+                const HRESULT stage1 =
+                    device->StretchRect(
+                        depthSource,
+                        nullptr,
+                        g_depthPlainSurface,
+                        nullptr,
+                        D3DTEXF_NONE);
 
-                WLOG_INFO(
-                    "wxl-modern-d3d9: R3D1 depth-copy PASS "
-                    "%ux%u sourceMSAA=8 -> INTZ",
-                    g_depthWidth,
-                    g_depthHeight);
+                HRESULT stage2 = D3DERR_INVALIDCALL;
+
+                if (SUCCEEDED(stage1))
+                {
+                    stage2 =
+                        device->StretchRect(
+                            g_depthPlainSurface,
+                            nullptr,
+                            g_depthSurface,
+                            nullptr,
+                            D3DTEXF_NONE);
+                }
+
+                depthStretchHr =
+                    FAILED(stage1) ? stage1 : stage2;
+
+                if (!g_loggedDepthCopyPass)
+                {
+                    g_loggedDepthCopyPass = true;
+
+                    WLOG_INFO(
+                        "wxl-modern-d3d9: R3D2 two-stage depth-copy "
+                        "%s stage1=0x%08X stage2=0x%08X",
+                        SUCCEEDED(depthStretchHr) ? "PASS" : "FAIL",
+                        static_cast<unsigned>(stage1),
+                        static_cast<unsigned>(stage2));
+                }
+            }
+            else
+            {
+                depthStretchHr =
+                    device->StretchRect(
+                        depthSource,
+                        nullptr,
+                        g_depthSurface,
+                        nullptr,
+                        D3DTEXF_NONE);
+
+                if (!g_loggedDepthCopyPass)
+                {
+                    g_loggedDepthCopyPass = true;
+
+                    WLOG_INFO(
+                        "wxl-modern-d3d9: R3D2 direct depth-copy "
+                        "%s %ux%u sourceMSAA=8 -> INTZ "
+                        "hr=0x%08X",
+                        SUCCEEDED(depthStretchHr) ? "PASS" : "FAIL",
+                        g_depthWidth,
+                        g_depthHeight,
+                        static_cast<unsigned>(depthStretchHr));
+                }
             }
         }
 
@@ -751,6 +984,20 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                     "hr=0x%08X",
                     static_cast<unsigned>(beginHr));
             }
+
+            SafeRelease(state);
+            SafeRelease(oldRt);
+            SafeRelease(oldDepth);
+            backbuffer->Release();
+            return false;
+        }
+
+        if (depthProof &&
+            depthMode == 1 &&
+            !RunIntzSelfTest(device))
+        {
+            RestoreDeviceState(
+                device, state, oldRt, oldDepth, oldViewport);
 
             SafeRelease(state);
             SafeRelease(oldRt);
@@ -811,7 +1058,12 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             const char* name =
                 mode == 0 ? "proof-tint" :
                 mode == 2 ? "SMAA" :
-                mode == 3 ? "depth-proof" :
+                mode == 3 ? "depth-selftest" :
+                mode == 4 ? "depth-raw" :
+                mode == 5 ? "depth-invert" :
+                mode == 6 ? "depth-expand" :
+                mode == 7 ? "depth-two-stage" :
+                mode == 8 ? "depth-legacy" :
                             "FXAA";
 
             WLOG_INFO(
@@ -927,6 +1179,21 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
         device->SetPixelShaderConstantF(
             0, rcpFrame, 1);
 
+        if (depthProof)
+        {
+            const float proofMode[4] = {
+                static_cast<float>(depthMode),
+                0.0f,
+                0.0f,
+                0.0f
+            };
+
+            device->SetPixelShaderConstantF(
+                1,
+                proofMode,
+                1);
+        }
+
         const float w =
             static_cast<float>(bbDesc.Width);
         const float h =
@@ -961,9 +1228,9 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
         if (SUCCEEDED(drawHr))
         {
             logPass(
-                depthProof ? 3 :
+                depthProof ? (2 + depthMode) :
                 g_proofTint ? 0 : 1,
-                depthProof ? 0 : fxaaTier);
+                depthProof ? depthMode : fxaaTier);
         }
 
         SafeRelease(state);
