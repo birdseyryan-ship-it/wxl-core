@@ -16,9 +16,12 @@
 
 #include "engine/ui/ImGuiHost.hpp"
 #include "gpu/Pipeline.hpp"
+#include "gpu/D3D9Fallback.hpp"
 #include "engine/gpu/Proxy.hpp"
 
 #include "imgui.h"
+
+#include <cstring>
 
 // Registers a "Graphics" panel with the dev overlay. The panel is generic over the effect chain: each effect
 // exposes an enable toggle and a quality tier, so effects added later appear here automatically. Anti-aliasing
@@ -38,12 +41,32 @@ namespace wxl::scripts::render_modern
                 return;
             }
 
-            // Engine MSAA: all effects run under it now. PPAA composites over the resolved MSAA frame; SSAO and
-            // Render Scale render the world single-sample into our offscreen (the post-process becomes its
-            // anti-aliasing) and draw the result back onto the MSAA backbuffer.
-            if (Pipeline::Get().MsaaActive())
+            const bool protonFallback = d3d9fallback::Available();
+
+            if (protonFallback)
             {
-                ImGui::TextColored(ImVec4(0.5f, 0.8f, 0.5f, 1.0f), "Engine MSAA active (effects supported)");
+                ImGui::TextColored(
+                    ImVec4(0.5f, 0.8f, 0.5f, 1.0f),
+                    "Proton D3D9 post-process backend");
+
+                bool proof = d3d9fallback::ProofTint();
+                if (ImGui::Checkbox("Proof Tint (diagnostic)", &proof))
+                    d3d9fallback::SetProofTint(proof);
+
+                if (proof)
+                    ImGui::TextColored(
+                        ImVec4(1.0f, 0.7f, 0.3f, 1.0f),
+                        "Diagnostic tint active; FXAA is temporarily bypassed.");
+
+                ImGui::TextDisabled(
+                    "Engine MSAA is resolved to a single-sample world image before post-FX.");
+                ImGui::Spacing();
+            }
+            else if (Pipeline::Get().MsaaActive())
+            {
+                ImGui::TextColored(
+                    ImVec4(0.5f, 0.8f, 0.5f, 1.0f),
+                    "Engine MSAA active (effects supported)");
                 ImGui::Spacing();
             }
 
@@ -52,6 +75,15 @@ namespace wxl::scripts::render_modern
                 // R3A validates colour-only AA first. Depth-dependent effects remain locked
                 // until the readable-depth/world redirect is implemented and proven.
                 if (e->NeedsDepth()) continue;
+
+                // R3B intentionally ports only FXAA first. SMAA comes after the
+                // fallback frame path itself is proven; CMAA2 is a later backend
+                // decision because its current implementation is D3D12 compute/UAV.
+                if (protonFallback && std::strcmp(e->Name(), "FXAA") != 0)
+                {
+                    ImGui::TextDisabled("%s (pending Proton backend port)", e->Name());
+                    continue;
+                }
 
                 ImGui::PushID(e.get());
 
@@ -85,7 +117,12 @@ namespace wxl::scripts::render_modern
 
             ImGui::Spacing();
             ImGui::Separator();
-            ImGui::TextDisabled("R3A: SSAO and Render Scale locked pending readable-depth validation.");
+            if (protonFallback)
+                ImGui::TextDisabled(
+                    "R3B: SMAA/CMAA2, SSAO and Render Scale remain locked.");
+            else
+                ImGui::TextDisabled(
+                    "R3: SSAO and Render Scale locked pending readable-depth validation.");
         }
 
         // File-scope registration: adds the panel at DLL load, before the overlay first draws.

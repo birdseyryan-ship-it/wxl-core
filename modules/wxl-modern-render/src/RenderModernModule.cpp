@@ -21,10 +21,13 @@
 #include "client/CWorldScene/RenderModernBridge.hpp"
 
 #include "gpu/Pipeline.hpp"
+#include "gpu/D3D9Fallback.hpp"
 
 #include <windows.h>
 #include <d3d9.h>
 #include <d3d9on12.h>
+
+#include <cstring>
 
 // The live-engine half of the graphics module. The proxy (d3d9.dll) owns the shared D3D12 device + queue and
 // runs On12; this module drives a D3D12 post-process pass on its own queue. It runs at the world -> UI
@@ -54,6 +57,7 @@ namespace wxl::scripts::render_modern
 
         void OnDeviceLost(const ev::DeviceResetArgs&)
         {
+            d3d9fallback::PrepareForReset();
             Pipeline::Get().PrepareForReset();
         }
 
@@ -84,14 +88,39 @@ namespace wxl::scripts::render_modern
          */
         void OnWorldRenderEnd(const ev::WorldRenderEndArgs& a)
         {
-            // Tell the core whether any enabled effect samples the world depth, so it binds a readable INTZ
-            // depth next frame. Independent of supersampling: SSAO gets its depth whether or not SSAA is on.
+            IDirect3DDevice9* device = static_cast<IDirect3DDevice9*>(a.device);
+
+            // Proton/Wine R3B path. The On12 interface itself exists there, but the
+            // underlying backbuffer cannot be unwrapped for our D3D12 work. Stay in
+            // D3D9, resolve the engine MSAA target, process the world, then let WoW
+            // draw its interface on top as normal.
+            if (d3d9fallback::Available())
+            {
+                wxl::runtime::render::SetReadableDepthNeeded(false);
+
+                bool fxaaEnabled = false;
+                Quality fxaaQuality = Quality::Medium;
+
+                for (const auto& e : Pipeline::Get().Effects())
+                {
+                    if (std::strcmp(e->Name(), "FXAA") == 0)
+                    {
+                        fxaaEnabled = e->Enabled();
+                        fxaaQuality = e->GetQuality();
+                        break;
+                    }
+                }
+
+                d3d9fallback::Frame(device, fxaaEnabled, fxaaQuality);
+                return;
+            }
+
+            // Native Windows D3D12 path.
             bool needDepth = false;
             for (const auto& e : Pipeline::Get().Effects())
                 if (e->Enabled() && e->NeedsDepth()) { needDepth = true; break; }
             wxl::runtime::render::SetReadableDepthNeeded(needDepth);
 
-            IDirect3DDevice9* device = static_cast<IDirect3DDevice9*>(a.device);
             if (!EnsureOn12(device)) return;
             if (!WxlD3D12Device()) return;
 

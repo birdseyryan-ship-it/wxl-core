@@ -9,4 +9,8 @@
 namespace wxl::runtime::render
 {
     void SetReadableDepthNeeded(bool needed);
+
+    // Ends the current D3D9 scene through the original vtable target, bypassing
+    // the core OnEndScene/ImGui hook. R3B uses this only to bracket StretchRect.
+    long EndSceneForPostProcess(void* device);
 }

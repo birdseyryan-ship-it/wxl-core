@@ -1,0 +1,23 @@
+#pragma once
+
+#include "gpu/Effect.hpp"
+
+struct IDirect3DDevice9;
+
+namespace wxl::scripts::render_modern::d3d9fallback
+{
+    // True under Wine / Proton. Native Windows keeps the D3D9On12/D3D12 path.
+    bool Available();
+
+    // Deliberately obvious diagnostic pass used only to prove that the fallback
+    // owns and rewrites the completed world image before the WoW UI is drawn.
+    bool ProofTint();
+    void SetProofTint(bool enabled);
+
+    // Releases D3DPOOL_DEFAULT resources before a D3D9 device reset.
+    void PrepareForReset();
+
+    // Runs the Proton colour post-process. ProofTint takes precedence over FXAA.
+    // Returns true when a post-process frame was successfully submitted.
+    bool Frame(IDirect3DDevice9* device, bool fxaaEnabled, Quality quality);
+}

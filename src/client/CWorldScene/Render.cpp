@@ -278,4 +278,12 @@ namespace wxl::runtime::render
     {
         (void)needed;
     }
+
+    long EndSceneForPostProcess(void* device)
+    {
+        if (!device || !g_origEndScene)
+            return D3DERR_INVALIDCALL;
+
+        return g_origEndScene(device);
+    }
 }
