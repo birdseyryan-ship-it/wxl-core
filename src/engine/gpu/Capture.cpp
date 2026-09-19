@@ -45,6 +45,16 @@ namespace
 
     HRESULT STDMETHODCALLTYPE HookReset(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS* pp);
 
+    /** @brief Detects Wine/Proton, where the native On12 Present path is the compatible compositor path. */
+    bool RunningUnderWine()
+    {
+        static const bool wine = []() {
+            HMODULE ntdll = GetModuleHandleA("ntdll.dll");
+            return ntdll && GetProcAddress(ntdll, "wine_get_version") != nullptr;
+        }();
+        return wine;
+    }
+
     /**
      * @brief Invokes the per-frame callback then forwards to the original EndScene.
      * @param dev  device whose EndScene was called.
@@ -73,6 +83,21 @@ namespace
         // only the explicit compatibility opt-out keeps the native fullscreen present path.
         if (g_windowed)
         {
+            // The historical custom DirectComposition presenter is required on native Windows, where
+            // D3D9On12's windowed Present does not reliably reach DWM. Wine/Proton has its own compositor
+            // integration and its On12 backbuffer currently rejects our UnwrapUnderlyingResource path
+            // (E_NOINTERFACE), so use the translation layer's native Present there instead.
+            if (RunningUnderWine())
+            {
+                static bool loggedWinePresent = false;
+                if (!loggedWinePresent)
+                {
+                    loggedWinePresent = true;
+                    Log("capture: Wine/Proton detected; using native windowed D3D9On12 Present");
+                }
+                return g_origPresent(dev, src, dst, wnd, dirty);
+            }
+
             HWND target = wnd ? wnd : g_devWindow;
             if (target && wxl::gpu::present::Present(dev, target))
             {
@@ -80,11 +105,8 @@ namespace
                 return S_OK;
             }
 
-            // This proxy owns windowed presentation, so calling the D3D9On12 Present underneath it is
-            // unsafe. In particular, glue-screen/reset transitions can make the custom presenter miss one
-            // frame while resources are being replaced; falling through here then enters D3D9On12 with a
-            // backbuffer whose underlying resource was managed by our queue and can crash inside d3d9on12.
-            // Keep DWM's last completed frame and retry on the next engine Present instead.
+            // This proxy owns native-Windows windowed presentation, so calling the D3D9On12 Present
+            // underneath it is unsafe. Keep DWM's last completed frame and retry next engine Present.
             ++g_customPresentMisses;
             if (g_customPresentMisses <= 4 || (g_customPresentMisses % 600) == 0)
                 Log("capture: custom present miss %u; native windowed Present suppressed", g_customPresentMisses);
