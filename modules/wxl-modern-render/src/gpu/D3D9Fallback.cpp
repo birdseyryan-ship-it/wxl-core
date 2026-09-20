@@ -286,7 +286,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             // mode 5 = two-stage copy, expanded far-depth detail
             // mode 6 = two-stage copy, graded nonlinear depth proof
             // mode 7 = two-stage copy, reconstructed linear view-Z proof
-            // mode 8 = reconstructed view-Z in obvious 10-unit bands
+            // mode 8 = reconstructed view-Z equivalence bands
             // mode 9 = raw stored-depth threshold bands, no reconstruction
             static const char* kDepthProofPs = R"HLSL(
 sampler2D depthTex : register(s0);
@@ -330,9 +330,15 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
     }
     else if (mode >= 7.5)
     {
-        // Same reconstructed linear view-Z as mode 7, but deliberately
-        // quantised into eight 10-unit bands across 0..80 units.
-        // This makes monotonic camera-space distance visually unambiguous.
+        // R3D3D reconstruction-equivalence proof.
+        //
+        // Reconstruct actual view-space Z using the engine projection,
+        // then quantise it at the real-distance boundaries corresponding
+        // to R3D3C Mode 9's raw depth thresholds.
+        //
+        // If projection/depth interpretation is correct, this image should
+        // reproduce Mode 9's distance layering despite taking the entirely
+        // different route through reconstructed viewZ.
         float denom = d - depthProjection.x;
         float safeDenom =
             abs(denom) > 1.0e-7 ? denom : -1.0e-7;
@@ -340,13 +346,15 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
         float viewZ =
             max(depthProjection.y / safeDenom, 0.0);
 
-        float normalized =
-            saturate(viewZ / depthProjection.z);
-
-        float band =
-            floor(normalized * 8.0) / 8.0;
-
-        v = 1.0 - band;
+        if      (viewZ <   0.9989904) v = 1.000;
+        else if (viewZ <   1.9954624) v = 0.875;
+        else if (viewZ <   3.9808896) v = 0.750;
+        else if (viewZ <   7.9219390) v = 0.625;
+        else if (viewZ <  15.6868860) v = 0.500;
+        else if (viewZ <  38.0850980) v = 0.375;
+        else if (viewZ <  72.6736400) v = 0.250;
+        else if (viewZ < 265.7684400) v = 0.125;
+        else                          v = 0.000;
     }
     else if (mode >= 6.5)
     {
@@ -1148,7 +1156,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                 mode == 7 ? "depth-two-stage" :
                 mode == 8 ? "depth-two-stage-graded" :
                 mode == 9 ? "depth-linear-viewz" :
-                mode == 10 ? "depth-viewz-bands" :
+                mode == 10 ? "depth-viewz-equivalence" :
                 mode == 11 ? "depth-raw-thresholds" :
                              "FXAA";
 
