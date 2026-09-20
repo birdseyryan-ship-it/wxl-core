@@ -116,21 +116,18 @@ namespace wxl::scripts::render_modern
             ReleaseProtonWorldDepth();
             protonWorldDepth_ = depth;
 
-            IDirect3DDevice9* device =
-                static_cast<IDirect3DDevice9*>(a.device);
+            // R3D3A1: the D3D device transform at this callback has already
+            // been replaced by a screen-space/post-process projection.
+            // The engine camera global remains the authoritative projection
+            // that generated the world's hardware depth.
+            const float* projection = cam::GetProjection();
 
-            D3DMATRIX projection = {};
-
-            const HRESULT projectionHr =
-                device
-                    ? device->GetTransform(
-                          D3DTS_PROJECTION,
-                          &projection)
-                    : E_POINTER;
-
-            if (SUCCEEDED(projectionHr))
+            if (projection)
             {
-                protonWorldProjection_ = projection;
+                std::memcpy(
+                    &protonWorldProjection_,
+                    projection,
+                    sizeof(protonWorldProjection_));
                 protonWorldProjectionValid_ = true;
 
                 if (ProjectionProbeEnabled())
@@ -168,7 +165,7 @@ namespace wxl::scripts::render_modern
                         if (protonProjectionSamples_ == 1)
                         {
                             WLOG_INFO(
-                                "wxl-modern-r3d3a: projection matrix "
+                                "wxl-modern-r3d3a1: engine projection matrix "
                                 "m=[%.9g %.9g %.9g %.9g | "
                                 "%.9g %.9g %.9g %.9g | "
                                 "%.9g %.9g %.9g %.9g | "
@@ -180,7 +177,7 @@ namespace wxl::scripts::render_modern
                         }
 
                         WLOG_INFO(
-                            "wxl-modern-r3d3a: projection sample=%u "
+                            "wxl-modern-r3d3a1: engine projection sample=%u "
                             "xScale=%.9g yScale=%.9g "
                             "A=%.9g B=%.9g near=%.9g far=%.9g "
                             "m11=%.9g m15=%.9g",
@@ -206,9 +203,7 @@ namespace wxl::scripts::render_modern
                     protonProjectionCaptureFailLogged_ = true;
 
                     WLOG_ERROR(
-                        "wxl-modern-r3d3a: projection capture FAIL "
-                        "hr=0x%08X",
-                        static_cast<unsigned>(projectionHr));
+                        "wxl-modern-r3d3a1: engine projection capture FAIL");
                 }
             }
         }
@@ -299,7 +294,7 @@ namespace wxl::scripts::render_modern
                             &protonWorldProjection_);
 
                     WLOG_INFO(
-                        "wxl-modern-r3d3a: projection snapshot retained "
+                        "wxl-modern-r3d3a1: engine projection snapshot retained "
                         "to world-ui boundary A=%.9g B=%.9g "
                         "xScale=%.9g yScale=%.9g",
                         m[10],
