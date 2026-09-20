@@ -223,14 +223,16 @@ namespace wxl::scripts::render_modern::grass
             std::string src(static_cast<const char*>(text->GetBufferPointer()));
             text->Release();
 
-            // R4C3-D: D3DDisassemble emits constant definitions as
-            //     def cN = x, y, z, w
-            // while D3DAssemble expects
-            //     def cN, x, y, z, w
-            //
-            // Normalize only "def " lines rather than globally replacing '=',
-            // preserving the captured engine shader instruction stream exactly.
+            // R4C3-E: D3DDisassemble output is not directly accepted by
+            // D3DAssemble.  In addition to emitting "def cN = ...", the live
+            // disassembly formats immediate floats in scientific notation,
+            // which the legacy assembly parser rejects.  Rebuild only def
+            // lines into assembler-safe decimal form; leave every instruction
+            // line byte-for-byte semantically unchanged.
             {
+                std::string normalized;
+                normalized.reserve(src.size() + 128);
+
                 size_t lineStart = 0;
 
                 while (lineStart < src.size())
@@ -239,20 +241,89 @@ namespace wxl::scripts::render_modern::grass
                     const size_t end =
                         lineEnd == std::string::npos ? src.size() : lineEnd;
 
-                    if (end > lineStart + 4 &&
-                        src.compare(lineStart, 4, "def ") == 0)
-                    {
-                        const size_t equals = src.find(" = ", lineStart);
+                    std::string line =
+                        src.substr(lineStart, end - lineStart);
 
-                        if (equals != std::string::npos && equals < end)
-                            src.replace(equals, 3, ", ");
+                    if (line.compare(0, 4, "def ") == 0)
+                    {
+                        const size_t equals = line.find(" = ");
+
+                        if (equals != std::string::npos)
+                            line.replace(equals, 3, ", ");
+
+                        const size_t comma = line.find(',');
+
+                        if (comma != std::string::npos)
+                        {
+                            const std::string prefix =
+                                line.substr(0, comma + 1);
+
+                            const char* cursor =
+                                line.c_str() + comma + 1;
+
+                            double value[4] = {};
+                            bool parsed = true;
+
+                            for (int i = 0; i < 4; ++i)
+                            {
+                                while (*cursor == ' ' || *cursor == '\t')
+                                    ++cursor;
+
+                                char* numberEnd = nullptr;
+                                value[i] = std::strtod(cursor, &numberEnd);
+
+                                if (numberEnd == cursor)
+                                {
+                                    parsed = false;
+                                    break;
+                                }
+
+                                cursor = numberEnd;
+
+                                while (*cursor == ' ' || *cursor == '\t')
+                                    ++cursor;
+
+                                if (i != 3)
+                                {
+                                    if (*cursor != ',')
+                                    {
+                                        parsed = false;
+                                        break;
+                                    }
+
+                                    ++cursor;
+                                }
+                            }
+
+                            if (parsed)
+                            {
+                                char rebuilt[512] = {};
+
+                                std::snprintf(
+                                    rebuilt,
+                                    sizeof(rebuilt),
+                                    "%s %.17f, %.17f, %.17f, %.17f",
+                                    prefix.c_str(),
+                                    value[0],
+                                    value[1],
+                                    value[2],
+                                    value[3]);
+
+                                line.assign(rebuilt);
+                            }
+                        }
                     }
+
+                    normalized.append(line);
 
                     if (lineEnd == std::string::npos)
                         break;
 
+                    normalized.push_back('\n');
                     lineStart = lineEnd + 1;
                 }
+
+                src.swap(normalized);
             }
 
             // The live 3.3.5a D3DDisassemble output spells the same
