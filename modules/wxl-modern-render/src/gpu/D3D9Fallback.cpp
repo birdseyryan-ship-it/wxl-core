@@ -57,6 +57,7 @@ namespace wxl::scripts::render_modern::d3d9fallback
 
         IDirect3DPixelShader9* g_proofShader = nullptr;
         IDirect3DPixelShader9* g_depthProofShader = nullptr;
+        IDirect3DPixelShader9* g_aoProofShader = nullptr;
         IDirect3DPixelShader9* g_fxaaShader[3] = { nullptr, nullptr, nullptr };
 
         UINT      g_width = 0;
@@ -78,6 +79,8 @@ namespace wxl::scripts::render_modern::d3d9fallback
         bool g_loggedCapturedDepth = false;
         bool g_loggedDepthSelfTest = false;
         bool g_loggedDepthMode = false;
+        bool g_loggedAoMode = false;
+        bool g_loggedAoProjection = false;
 
         struct FsVertex
         {
@@ -138,6 +141,32 @@ namespace wxl::scripts::render_modern::d3d9fallback
             return mode;
         }
 
+        int AoProofMode()
+        {
+            static const int mode = []()
+            {
+                char raw[16] = {};
+
+                const DWORD n =
+                    GetEnvironmentVariableA(
+                        "WXL_AO_PROOF_MODE",
+                        raw,
+                        sizeof(raw));
+
+                if (n > 0 &&
+                    n < sizeof(raw) &&
+                    raw[1] == '\0' &&
+                    (raw[0] == '1' || raw[0] == '2'))
+                {
+                    return static_cast<int>(raw[0] - '0');
+                }
+
+                return 0;
+            }();
+
+            return mode;
+        }
+
         void ReleaseTarget()
         {
             SafeRelease(g_sceneSurface);
@@ -162,6 +191,7 @@ namespace wxl::scripts::render_modern::d3d9fallback
 
             SafeRelease(g_proofShader);
             SafeRelease(g_depthProofShader);
+            SafeRelease(g_aoProofShader);
 
             for (auto*& p : g_fxaaShader)
                 SafeRelease(p);
@@ -180,6 +210,8 @@ namespace wxl::scripts::render_modern::d3d9fallback
             g_loggedCapturedDepth = false;
             g_loggedDepthSelfTest = false;
             g_loggedDepthMode = false;
+            g_loggedAoMode = false;
+            g_loggedAoProjection = false;
         }
 
         bool CompilePixelShader(IDirect3DDevice9* dev,
@@ -393,6 +425,178 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
 
             WLOG_INFO(
                 "wxl-modern-d3d9: R3D2 INTZ truth-test shader ready");
+
+            return true;
+        }
+
+        bool EnsureAoProofShader(IDirect3DDevice9* dev)
+        {
+            if (g_aoProofShader)
+                return true;
+
+            static const char* kAoProofPs = R"HLSL(
+sampler2D sceneTex : register(s0);
+sampler2D depthTex : register(s1);
+
+float4 rcpFrame  : register(c0);
+// proj = xScale, yScale, A, B
+float4 proj      : register(c1);
+// aoParams = worldRadius, intensity, bias, maxUvRadius
+float4 aoParams  : register(c2);
+// aoControl = mode, power, fadeStart, fadeEnd
+float4 aoControl : register(c3);
+
+float linearZ(float d)
+{
+    float denom = d - proj.z;
+    float safeDenom =
+        abs(denom) > 1.0e-7 ? denom : -1.0e-7;
+
+    return max(proj.w / safeDenom, 0.0);
+}
+
+float3 viewPos(float2 uv, float d)
+{
+    float z = linearZ(d);
+
+    float2 n = uv * 2.0 - 1.0;
+    n.y = -n.y;
+
+    return float3(
+        n.x * z / proj.x,
+        n.y * z / proj.y,
+        z);
+}
+
+float aoTap(
+    float3 P,
+    float3 N,
+    float2 uv,
+    float2 direction,
+    float uvRadius,
+    float scale)
+{
+    float2 suv =
+        uv + direction * uvRadius * scale;
+
+    float sd = tex2D(depthTex, suv).r;
+
+    // Sky / untouched clear depth is not an occluder.
+    if (sd >= 0.9995)
+        return 0.0;
+
+    float3 Q = viewPos(suv, sd);
+    float3 V = Q - P;
+
+    float dist = length(V);
+
+    if (dist <= 1.0e-4 ||
+        dist >= aoParams.x)
+        return 0.0;
+
+    // Hemisphere test against the reconstructed surface normal.
+    // aoParams.z is a small world-space bias against self-occlusion.
+    float hemi =
+        saturate(
+            (dot(N, V) - aoParams.z) /
+            max(dist, 1.0e-4));
+
+    float falloff =
+        saturate(1.0 - dist / aoParams.x);
+
+    return hemi * falloff;
+}
+
+float4 main(float2 uv : TEXCOORD0) : COLOR0
+{
+    float4 scene = tex2D(sceneTex, uv);
+    float d = tex2D(depthTex, uv).r;
+
+    // Preserve clear sky. In mask mode it becomes white = no AO.
+    if (d >= 0.9995)
+    {
+        if (aoControl.x < 1.5)
+            return float4(1.0, 1.0, 1.0, 1.0);
+
+        return float4(scene.rgb, 1.0);
+    }
+
+    float3 P = viewPos(uv, d);
+
+    // Reconstruct the local view-space surface normal from neighbouring
+    // pixels without requiring a normal buffer.
+    float3 dPdx = ddx(P);
+    float3 dPdy = ddy(P);
+
+    float3 rawN = cross(dPdx, dPdy);
+    float nLen = max(length(rawN), 1.0e-5);
+    float3 N = rawN / nLen;
+
+    // Keep the normal on the camera-facing hemisphere.
+    if (dot(N, -P) < 0.0)
+        N = -N;
+
+    // Project one world-space AO radius into UV space.
+    // Clamp the very-near footprint to keep the proof bounded.
+    float uvRadius =
+        min(
+            0.5 * aoParams.x * proj.y /
+            max(P.z, 0.01),
+            aoParams.w);
+
+    float occ = 0.0;
+
+    // Near cardinal ring.
+    occ += aoTap(P, N, uv, float2( 1.0,  0.0), uvRadius, 0.40);
+    occ += aoTap(P, N, uv, float2(-1.0,  0.0), uvRadius, 0.40);
+    occ += aoTap(P, N, uv, float2( 0.0,  1.0), uvRadius, 0.40);
+    occ += aoTap(P, N, uv, float2( 0.0, -1.0), uvRadius, 0.40);
+
+    // Wider diagonal ring.
+    occ += aoTap(P, N, uv, float2( 0.7071068,  0.7071068), uvRadius, 0.85);
+    occ += aoTap(P, N, uv, float2(-0.7071068,  0.7071068), uvRadius, 0.85);
+    occ += aoTap(P, N, uv, float2( 0.7071068, -0.7071068), uvRadius, 0.85);
+    occ += aoTap(P, N, uv, float2(-0.7071068, -0.7071068), uvRadius, 0.85);
+
+    occ /= 8.0;
+
+    float ao =
+        saturate(1.0 - occ * aoParams.y);
+
+    ao =
+        pow(
+            max(ao, 0.0001),
+            aoControl.y);
+
+    // Near-field AO only. Full strength through fadeStart, then fade
+    // smoothly to no occlusion by fadeEnd.
+    if (aoControl.w > aoControl.z)
+    {
+        float fade =
+            saturate(
+                (P.z - aoControl.z) /
+                (aoControl.w - aoControl.z));
+
+        ao = lerp(ao, 1.0, fade);
+    }
+
+    if (aoControl.x < 1.5)
+        return float4(ao, ao, ao, 1.0);
+
+    return float4(scene.rgb * ao, 1.0);
+}
+)HLSL";
+
+            if (!CompilePixelShader(
+                    dev,
+                    kAoProofPs,
+                    "R3E0 AO correctness proof",
+                    &g_aoProofShader))
+                return false;
+
+            WLOG_INFO(
+                "wxl-modern-d3d9: R3E0 AO proof shader ready "
+                "(8-tap view-space SSAO)");
 
             return true;
         }
@@ -816,7 +1020,21 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
         const int depthMode = DepthProofMode();
         const bool depthProof = depthMode > 0;
 
-        if ((depthMode == 7 || depthMode == 8) &&
+        const int requestedAoProofMode = AoProofMode();
+
+        // Existing depth diagnostics deliberately take precedence when both
+        // environment switches are supplied.
+        const bool aoProof =
+            !depthProof &&
+            requestedAoProofMode > 0;
+
+        const int aoProofMode =
+            aoProof ? requestedAoProofMode : 0;
+
+        const bool needReadableDepth =
+            depthProof || aoProof;
+
+        if (((depthMode == 7 || depthMode == 8) || aoProof) &&
             !worldProjection)
         {
             static bool loggedMissingProjection = false;
@@ -826,11 +1044,37 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                 loggedMissingProjection = true;
 
                 WLOG_ERROR(
-                    "wxl-modern-r3d3b: linear depth requires "
-                    "the retained world projection");
+                    "wxl-modern-d3d9: retained world projection "
+                    "required for linear-depth/AO processing");
             }
 
             return false;
+        }
+
+        if (aoProof && !worldDepth)
+        {
+            static bool loggedMissingAoDepth = false;
+
+            if (!loggedMissingAoDepth)
+            {
+                loggedMissingAoDepth = true;
+
+                WLOG_ERROR(
+                    "wxl-modern-r3e0: AO requires the captured "
+                    "world-depth surface");
+            }
+
+            return false;
+        }
+
+        if (aoProof && !g_loggedAoMode)
+        {
+            g_loggedAoMode = true;
+
+            WLOG_INFO(
+                "wxl-modern-r3e0: AO proof mode=%d "
+                "(1=mask 2=composite)",
+                aoProofMode);
         }
 
         if (depthProof && !g_loggedDepthMode)
@@ -843,6 +1087,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
         }
 
         if (!depthProof &&
+            !aoProof &&
             !g_proofTint &&
             !fxaaEnabled &&
             !smaaEnabled)
@@ -862,6 +1107,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
         // enables both, prefer SMAA so there is still exactly one AA pass.
         const bool useSmaa =
             !depthProof &&
+            !aoProof &&
             !g_proofTint &&
             smaaEnabled;
 
@@ -873,6 +1119,13 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                 return false;
 
             shader = g_depthProofShader;
+        }
+        else if (aoProof)
+        {
+            if (!EnsureAoProofShader(device))
+                return false;
+
+            shader = g_aoProofShader;
         }
         else if (g_proofTint)
         {
@@ -927,7 +1180,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
         IDirect3DSurface9* depthSource =
             worldDepth ? worldDepth : oldDepth;
 
-        if (depthProof &&
+        if (needReadableDepth &&
             worldDepth &&
             !g_loggedCapturedDepth)
         {
@@ -947,7 +1200,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             }
         }
 
-        if (depthProof &&
+        if (needReadableDepth &&
             (!depthSource ||
              !EnsureDepthTarget(device, depthSource)))
         {
@@ -992,9 +1245,11 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
 
         HRESULT depthStretchHr = S_OK;
 
-        if (depthProof && depthMode != 1)
+        if (needReadableDepth &&
+            !(depthProof && depthMode == 1))
         {
-            if (depthMode == 5 ||
+            if (aoProof ||
+                depthMode == 5 ||
                 depthMode == 6 ||
                 depthMode == 7 ||
                 depthMode == 8 ||
@@ -1097,7 +1352,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             return false;
         }
 
-        if (depthProof && FAILED(depthStretchHr))
+        if (needReadableDepth && FAILED(depthStretchHr))
         {
             if (!g_loggedDepthStretchFail)
             {
@@ -1158,6 +1413,8 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                 mode == 9 ? "depth-linear-viewz" :
                 mode == 10 ? "depth-viewz-equivalence" :
                 mode == 11 ? "depth-raw-thresholds" :
+                mode == 12 ? "ao-proof-mask" :
+                mode == 13 ? "ao-proof-composite" :
                              "FXAA";
 
             WLOG_INFO(
@@ -1242,6 +1499,13 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                 ? static_cast<IDirect3DBaseTexture9*>(g_depthTexture)
                 : static_cast<IDirect3DBaseTexture9*>(g_sceneTexture));
 
+        if (aoProof)
+        {
+            device->SetTexture(
+                1,
+                static_cast<IDirect3DBaseTexture9*>(g_depthTexture));
+        }
+
         device->SetSamplerState(
             0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
         device->SetSamplerState(
@@ -1263,6 +1527,22 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
         device->SetSamplerState(
             0, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
 
+        if (aoProof)
+        {
+            device->SetSamplerState(
+                1, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+            device->SetSamplerState(
+                1, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+            device->SetSamplerState(
+                1, D3DSAMP_MINFILTER, D3DTEXF_POINT);
+            device->SetSamplerState(
+                1, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+            device->SetSamplerState(
+                1, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
+            device->SetSamplerState(
+                1, D3DSAMP_SRGBTEXTURE, FALSE);
+        }
+
         const float rcpFrame[4] = {
             1.0f / static_cast<float>(bbDesc.Width),
             1.0f / static_cast<float>(bbDesc.Height),
@@ -1272,6 +1552,61 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
 
         device->SetPixelShaderConstantF(
             0, rcpFrame, 1);
+
+        if (aoProof && worldProjection)
+        {
+            const float projection[4] = {
+                worldProjection[0],
+                worldProjection[5],
+                worldProjection[10],
+                worldProjection[14]
+            };
+
+            // Deliberately visible correctness-proof values.
+            // Final CE look will be tuned only after AO correctness is proven.
+            const float aoParams[4] = {
+                1.00f,   // world-space radius
+                2.20f,   // proof intensity
+                0.015f,  // self-occlusion bias
+                0.060f   // maximum UV radius for near geometry
+            };
+
+            const float aoControl[4] = {
+                static_cast<float>(aoProofMode),
+                1.25f,   // contrast/power
+                20.0f,   // full-strength distance
+                60.0f    // fully faded distance
+            };
+
+            device->SetPixelShaderConstantF(
+                1, projection, 1);
+
+            device->SetPixelShaderConstantF(
+                2, aoParams, 1);
+
+            device->SetPixelShaderConstantF(
+                3, aoControl, 1);
+
+            if (!g_loggedAoProjection)
+            {
+                g_loggedAoProjection = true;
+
+                WLOG_INFO(
+                    "wxl-modern-r3e0: AO projection "
+                    "xScale=%.9g yScale=%.9g A=%.9g B=%.9g "
+                    "radius=%.3g intensity=%.3g bias=%.3g "
+                    "fade=%.3g..%.3g",
+                    projection[0],
+                    projection[1],
+                    projection[2],
+                    projection[3],
+                    aoParams[0],
+                    aoParams[1],
+                    aoParams[2],
+                    aoControl[2],
+                    aoControl[3]);
+            }
+        }
 
         if (depthProof)
         {
@@ -1359,6 +1694,9 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
 
         device->SetTexture(0, nullptr);
 
+        if (aoProof)
+            device->SetTexture(1, nullptr);
+
         RestoreDeviceState(
             device, state, oldRt, oldDepth, oldViewport);
 
@@ -1372,10 +1710,17 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
 
         if (SUCCEEDED(drawHr))
         {
-            logPass(
+            const int passMode =
                 depthProof ? (2 + depthMode) :
-                g_proofTint ? 0 : 1,
-                depthProof ? depthMode : fxaaTier);
+                aoProof ? (aoProofMode == 1 ? 12 : 13) :
+                g_proofTint ? 0 : 1;
+
+            const int passTier =
+                depthProof ? depthMode :
+                aoProof ? aoProofMode :
+                fxaaTier;
+
+            logPass(passMode, passTier);
         }
 
         SafeRelease(state);
