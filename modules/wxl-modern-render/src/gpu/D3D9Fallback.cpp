@@ -106,7 +106,7 @@ namespace wxl::scripts::render_modern::d3d9fallback
                 if (modeLen > 0 &&
                     modeLen < sizeof(modeValue) &&
                     modeValue[0] >= '1' &&
-                    modeValue[0] <= '8')
+                    modeValue[0] <= '9')
                 {
                     return static_cast<int>(
                         modeValue[0] - '0');
@@ -287,6 +287,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             // mode 6 = two-stage copy, graded nonlinear depth proof
             // mode 7 = two-stage copy, reconstructed linear view-Z proof
             // mode 8 = reconstructed view-Z in obvious 10-unit bands
+            // mode 9 = raw stored-depth threshold bands, no reconstruction
             static const char* kDepthProofPs = R"HLSL(
 sampler2D depthTex : register(s0);
 float4 proofMode : register(c1);
@@ -311,6 +312,21 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
         // the tiny (1-depth) range aggressively so real structure cannot
         // hide in an almost-white raw image.
         v = saturate((1.0 - d) * 4096.0);
+    }
+    else if (mode >= 8.5)
+    {
+        // R3D3C: raw sampled depth buckets. No projection or viewport
+        // assumptions are applied here. Under ordinary D3D 0..1 depth
+        // these roughly correspond to progressively farther geometry.
+        if      (d < 0.6000) v = 1.000;
+        else if (d < 0.8000) v = 0.875;
+        else if (d < 0.9000) v = 0.750;
+        else if (d < 0.9500) v = 0.625;
+        else if (d < 0.9750) v = 0.500;
+        else if (d < 0.9900) v = 0.375;
+        else if (d < 0.9950) v = 0.250;
+        else if (d < 0.9990) v = 0.125;
+        else                 v = 0.000;
     }
     else if (mode >= 7.5)
     {
@@ -973,7 +989,8 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             if (depthMode == 5 ||
                 depthMode == 6 ||
                 depthMode == 7 ||
-                depthMode == 8)
+                depthMode == 8 ||
+                depthMode == 9)
             {
                 const HRESULT stage1 =
                     device->StretchRect(
@@ -1132,6 +1149,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                 mode == 8 ? "depth-two-stage-graded" :
                 mode == 9 ? "depth-linear-viewz" :
                 mode == 10 ? "depth-viewz-bands" :
+                mode == 11 ? "depth-raw-thresholds" :
                              "FXAA";
 
             WLOG_INFO(

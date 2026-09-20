@@ -130,7 +130,26 @@ namespace wxl::events
      *        not reliably that surface -- a post-process pass inside the call can leave its own -- and
      *        depth-testing against the wrong one rejects every pixel without reporting an error.
      */
-    struct WorldSceneEndArgs  { void* device; void* sceneDepth; };
+    struct WorldSceneEndArgs
+    {
+        void*        device;
+        void*        sceneDepth;
+
+        // R3D3C: exact D3D state captured immediately before the native
+        // world scene pass. sceneProjection points to a synchronous
+        // stack snapshot valid for the duration of this event emission.
+        const float* sceneProjection;
+
+        uint32_t viewportX;
+        uint32_t viewportY;
+        uint32_t viewportWidth;
+        uint32_t viewportHeight;
+        float    viewportMinZ;
+        float    viewportMaxZ;
+
+        bool sceneProjectionValid;
+        bool viewportValid;
+    };
     /**
      * @brief Args for OnLiquidRender, fired before the native liquid pass draws. passType is 0 for the
      *        main pass, 1 for the secondary; instanceCount is the visible liquid instances in this pass;

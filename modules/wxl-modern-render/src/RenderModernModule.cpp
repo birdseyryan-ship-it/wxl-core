@@ -77,6 +77,29 @@ namespace wxl::scripts::render_modern
             }
         }
 
+        static bool DepthStateProbeEnabled()
+        {
+            static const bool enabled = []()
+            {
+                char raw[16] = {};
+                const DWORD n = GetEnvironmentVariableA(
+                    "WXL_DEPTH_STATE_PROBE",
+                    raw,
+                    sizeof(raw));
+
+                if (n == 0 || n >= sizeof(raw))
+                    return false;
+
+                const char c = raw[0];
+
+                return c != '0' &&
+                       c != 'n' && c != 'N' &&
+                       c != 'f' && c != 'F';
+            }();
+
+            return enabled;
+        }
+
         static bool ProjectionProbeEnabled()
         {
             static const bool enabled = []()
@@ -115,6 +138,66 @@ namespace wxl::scripts::render_modern
 
             ReleaseProtonWorldDepth();
             protonWorldDepth_ = depth;
+
+            if (DepthStateProbeEnabled())
+            {
+                static bool loggedDepthState = false;
+
+                if (!loggedDepthState)
+                {
+                    loggedDepthState = true;
+
+                    if (a.sceneProjectionValid && a.sceneProjection)
+                    {
+                        const float* p = a.sceneProjection;
+
+                        WLOG_INFO(
+                            "wxl-modern-r3d3c: pre-world device projection "
+                            "m=[%.9g %.9g %.9g %.9g | "
+                            "%.9g %.9g %.9g %.9g | "
+                            "%.9g %.9g %.9g %.9g | "
+                            "%.9g %.9g %.9g %.9g]",
+                            p[0],  p[1],  p[2],  p[3],
+                            p[4],  p[5],  p[6],  p[7],
+                            p[8],  p[9],  p[10], p[11],
+                            p[12], p[13], p[14], p[15]);
+
+                        WLOG_INFO(
+                            "wxl-modern-r3d3c: pre-world device "
+                            "A=%.9g B=%.9g m11=%.9g m15=%.9g",
+                            p[10],
+                            p[14],
+                            p[11],
+                            p[15]);
+                    }
+                    else
+                    {
+                        WLOG_ERROR(
+                            "wxl-modern-r3d3c: pre-world device "
+                            "projection capture FAIL");
+                    }
+
+                    if (a.viewportValid)
+                    {
+                        WLOG_INFO(
+                            "wxl-modern-r3d3c: pre-world viewport "
+                            "x=%u y=%u width=%u height=%u "
+                            "minZ=%.9g maxZ=%.9g",
+                            a.viewportX,
+                            a.viewportY,
+                            a.viewportWidth,
+                            a.viewportHeight,
+                            a.viewportMinZ,
+                            a.viewportMaxZ);
+                    }
+                    else
+                    {
+                        WLOG_ERROR(
+                            "wxl-modern-r3d3c: pre-world viewport "
+                            "capture FAIL");
+                    }
+                }
+            }
 
             // R3D3A1: the D3D device transform at this callback has already
             // been replaced by a screen-space/post-process projection.

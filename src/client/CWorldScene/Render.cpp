@@ -122,14 +122,49 @@ namespace
         // afterwards is testing against a surface the world never wrote to, which rejects all of its
         // geometry and reports nothing.
         IDirect3DSurface9* sceneDepth = nullptr;
-        if (IDirect3DDevice9* d = static_cast<IDirect3DDevice9*>(gx::RawDevice()))
+        D3DMATRIX sceneProjection = {};
+        D3DVIEWPORT9 sceneViewport = {};
+        bool sceneProjectionValid = false;
+        bool sceneViewportValid = false;
+
+        if (IDirect3DDevice9* d =
+                static_cast<IDirect3DDevice9*>(gx::RawDevice()))
+        {
             d->GetDepthStencilSurface(&sceneDepth);
+
+            sceneProjectionValid =
+                SUCCEEDED(
+                    d->GetTransform(
+                        D3DTS_PROJECTION,
+                        &sceneProjection));
+
+            sceneViewportValid =
+                SUCCEEDED(
+                    d->GetViewport(
+                        &sceneViewport));
+        }
 
         g_origWorldScene(worldFrame, edx);
 
         if (ev::Any(ev::Event::OnWorldSceneEnd))
         {
-            ev::WorldSceneEndArgs a{ gx::RawDevice(), sceneDepth };
+            ev::WorldSceneEndArgs a{
+                gx::RawDevice(),
+                sceneDepth,
+                sceneProjectionValid
+                    ? reinterpret_cast<const float*>(
+                          &sceneProjection)
+                    : nullptr,
+                sceneViewport.X,
+                sceneViewport.Y,
+                sceneViewport.Width,
+                sceneViewport.Height,
+                sceneViewport.MinZ,
+                sceneViewport.MaxZ,
+                sceneProjectionValid,
+                sceneViewportValid
+            };
+
             ev::Emit(ev::Event::OnWorldSceneEnd, &a);
         }
 
