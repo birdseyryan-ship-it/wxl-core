@@ -314,6 +314,17 @@ namespace wxl::scripts::render_modern::grass
                         }
                     }
 
+                    // R4C3-F: the live disassembler prints the legacy
+                    // fixed-function specular alias as "dcl_specular0".
+                    // D3D9 assembly expresses that same semantic as COLOR1:
+                    // COLOR0 = diffuse, COLOR1 = specular.
+                    if (line.compare(0, 13, "dcl_specular0") == 0 &&
+                        line.size() > 13 &&
+                        (line[13] == ' ' || line[13] == '\t'))
+                    {
+                        line.replace(0, 13, "dcl_color1");
+                    }
+
                     normalized.append(line);
 
                     if (lineEnd == std::string::npos)
