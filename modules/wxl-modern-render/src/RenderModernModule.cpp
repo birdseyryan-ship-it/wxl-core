@@ -350,7 +350,7 @@ namespace wxl::scripts::render_modern
             char* end = nullptr;
             const long parsed = std::strtol(raw, &end, 10);
 
-            if (end == raw || (end && *end != '\\0'))
+            if (end == raw || (end && *end != '\0'))
                 return c;
 
             long clamped = parsed;
