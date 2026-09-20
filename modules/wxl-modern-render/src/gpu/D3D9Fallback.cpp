@@ -216,6 +216,35 @@ namespace wxl::scripts::render_modern::d3d9fallback
             return mode;
         }
 
+        int AoDenoiseTuneMode()
+        {
+            static const int mode = []()
+            {
+                char raw[16] = {};
+
+                const DWORD n =
+                    GetEnvironmentVariableA(
+                        "WXL_AO_DENOISE_TUNE",
+                        raw,
+                        sizeof(raw));
+
+                if (n > 0 &&
+                    n < sizeof(raw) &&
+                    raw[1] == '\0' &&
+                    raw[0] >= '1' &&
+                    raw[0] <= '3')
+                {
+                    return static_cast<int>(
+                        raw[0] - '0');
+                }
+
+                // Mode 0 is exactly the proven R3E4 bilateral behavior.
+                return 0;
+            }();
+
+            return mode;
+        }
+
         void ReleaseTarget()
         {
             SafeRelease(g_sceneSurface);
@@ -749,6 +778,8 @@ sampler2D depthTex : register(s2);
 float4 metrics : register(c0);
 // x=A, y=B, z=depth sharpness, w=mode
 float4 denoise : register(c1);
+// x=AO range sharpness, y=anti-dark-bleed protection
+float4 aoAware : register(c2);
 
 float linearZ(float d)
 {
@@ -765,6 +796,7 @@ float2 aoTap(
     float2 uv,
     float2 offset,
     float centerZ,
+    float centerAo,
     float spatialWeight)
 {
     float2 suv =
@@ -785,12 +817,32 @@ float2 aoTap(
             -abs(sampleZ - centerZ) *
             denoise.z);
 
-    float w =
-        spatialWeight *
-        depthWeight;
-
     float a =
         tex2D(aoTex, suv).r;
+
+    // R3E4A range-aware bilateral term.
+    //
+    // The proven R3E4 filter protects depth discontinuities, but nearby
+    // pixels on the same ground plane have almost identical depth. That
+    // allows a dark contact AO value to feather outward into otherwise
+    // bright ground. Weight AO-disparate neighbours less strongly.
+    //
+    // Rational weighting is deliberately cheap for ps_3_0:
+    // aoAware.x == 0 produces exactly weight 1.
+    float aoDelta =
+        abs(a - centerAo);
+
+    float aoRangeWeight =
+        1.0 /
+        (1.0 + aoDelta * aoAware.x);
+
+    aoRangeWeight *=
+        aoRangeWeight;
+
+    float w =
+        spatialWeight *
+        depthWeight *
+        aoRangeWeight;
 
     return float2(
         a * w,
@@ -816,25 +868,43 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
     float centerZ =
         linearZ(dc);
 
+    float centerAo =
+        tex2D(aoTex, uv).r;
+
     float2 total =
         float2(0.0, 0.0);
 
-    total += aoTap(uv, float2(-1,-1), centerZ, 1.0);
-    total += aoTap(uv, float2( 0,-1), centerZ, 2.0);
-    total += aoTap(uv, float2( 1,-1), centerZ, 1.0);
+    total += aoTap(uv, float2(-1,-1), centerZ, centerAo, 1.0);
+    total += aoTap(uv, float2( 0,-1), centerZ, centerAo, 2.0);
+    total += aoTap(uv, float2( 1,-1), centerZ, centerAo, 1.0);
 
-    total += aoTap(uv, float2(-1, 0), centerZ, 2.0);
-    total += aoTap(uv, float2( 0, 0), centerZ, 4.0);
-    total += aoTap(uv, float2( 1, 0), centerZ, 2.0);
+    total += aoTap(uv, float2(-1, 0), centerZ, centerAo, 2.0);
+    total += aoTap(uv, float2( 0, 0), centerZ, centerAo, 4.0);
+    total += aoTap(uv, float2( 1, 0), centerZ, centerAo, 2.0);
 
-    total += aoTap(uv, float2(-1, 1), centerZ, 1.0);
-    total += aoTap(uv, float2( 0, 1), centerZ, 2.0);
-    total += aoTap(uv, float2( 1, 1), centerZ, 1.0);
+    total += aoTap(uv, float2(-1, 1), centerZ, centerAo, 1.0);
+    total += aoTap(uv, float2( 0, 1), centerZ, centerAo, 2.0);
+    total += aoTap(uv, float2( 1, 1), centerZ, centerAo, 1.0);
 
     float ao =
         total.y > 1.0e-5
             ? total.x / total.y
-            : tex2D(aoTex, uv).r;
+            : centerAo;
+
+    // The range term above already rejects unlike AO samples. This second,
+    // asymmetric guard addresses the exact observed artifact: a dark contact
+    // should not be allowed to spread strongly into a brighter centre pixel.
+    //
+    // It never makes a genuinely dark centre darker. It only pulls a filtered
+    // result back toward centerAo when the filter would have darkened it.
+    float noDarkBleed =
+        max(ao, centerAo);
+
+    ao =
+        lerp(
+            ao,
+            noDarkBleed,
+            saturate(aoAware.y));
 
     ao =
         saturate(ao);
@@ -851,13 +921,13 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             if (!CompilePixelShader(
                     dev,
                     kAoDenoisePs,
-                    "R3E2 depth-aware AO denoise",
+                    "R3E4A contact-preserving AO denoise",
                     &g_aoDenoiseShader))
                 return false;
 
             WLOG_INFO(
-                "wxl-modern-d3d9: R3E2 AO denoise shader ready "
-                "(half-res -> full-res bilateral)");
+                "wxl-modern-d3d9: R3E4A AO denoise shader ready "
+                "(depth + AO-range-aware bilateral)");
 
             return true;
         }
@@ -1451,6 +1521,9 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
         const int aoTuneMode =
             AoTuneMode();
 
+        const int aoDenoiseTuneMode =
+            AoDenoiseTuneMode();
+
         // R3E4 production AO is independent of the diagnostic environment
         // switches and defaults ON for Classic Enhanced.
         bool productionAo =
@@ -1947,6 +2020,31 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             float radialFalloff  = 2.00f;
             float denoiseSharp   = 8.00f;
 
+            // R3E4A contact-preserving denoise sweep.
+            //
+            // 0 = exact R3E4
+            // 1 = mild
+            // 2 = balanced
+            // 3 = strong
+            float aoRangeSharp   = 0.0f;
+            float aoBleedProtect = 0.0f;
+
+            if (aoDenoiseTuneMode == 1)
+            {
+                aoRangeSharp   = 6.0f;
+                aoBleedProtect = 0.25f;
+            }
+            else if (aoDenoiseTuneMode == 2)
+            {
+                aoRangeSharp   = 12.0f;
+                aoBleedProtect = 0.50f;
+            }
+            else if (aoDenoiseTuneMode == 3)
+            {
+                aoRangeSharp   = 20.0f;
+                aoBleedProtect = 0.75f;
+            }
+
             if (effectiveTuneMode == 1)
             {
                 // Balanced: preserve architectural depth but tighten
@@ -2208,11 +2306,21 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                 static_cast<float>(aoOutputMode)
             };
 
+            const float aoAwareParams[4] = {
+                aoRangeSharp,
+                aoBleedProtect,
+                0.0f,
+                0.0f
+            };
+
             device->SetPixelShaderConstantF(
                 0, metrics, 1);
 
             device->SetPixelShaderConstantF(
                 1, denoiseParams, 1);
+
+            device->SetPixelShaderConstantF(
+                2, aoAwareParams, 1);
 
             const float w =
                 static_cast<float>(bbDesc.Width);
@@ -2247,7 +2355,8 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                     "xScale=%.9g yScale=%.9g A=%.9g B=%.9g "
                     "radius=%.3g intensity=%.3g bias=%.3g "
                     "maxUv=%.3g power=%.3g radial=%.3g "
-                    "fade=%.3g..%.3g ao=%ux%u denoiseSharp=%.3g",
+                    "fade=%.3g..%.3g ao=%ux%u denoiseSharp=%.3g "
+                    "contactTune=%d aoRangeSharp=%.3g bleedProtect=%.3g",
                     productionAo ? 1 : 0,
                     effectiveTuneMode,
                     projection[0],
@@ -2264,7 +2373,10 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                     rawControl[2],
                     g_aoWidth,
                     g_aoHeight,
-                    denoiseParams[2]);
+                    denoiseParams[2],
+                    aoDenoiseTuneMode,
+                    aoRangeSharp,
+                    aoBleedProtect);
             }
 
             if (FAILED(denoiseDrawHr))
