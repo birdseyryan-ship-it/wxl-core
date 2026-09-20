@@ -89,10 +89,26 @@ namespace wxl::offsets::game::worldscene
     using CullMapObjDefGroupFromExteriorFn = void(__fastcall*)(void* defInstance, void* edx, void* groupEntry,
                                                                  float* frustumCorners, int flag);
 
-    // World scene and view setup
-    /// Object fade-out distance in one call - the lever an extension needs to push doodad/object
-    /// popping out with a raised far clip. __cdecl, caller-cleaned.
-    constexpr uintptr_t kFadeDistanceScale                 = 0x0078F570;
+    // World scene distance-table builder.
+    //
+    // __cdecl(float scale), caller-cleaned. Rebuilds the five object-distance
+    // bands plus their fade-start and squared culling thresholds. The scale
+    // affects the middle three distance bands; the first and fifth are
+    // normally unscaled.
+    constexpr uintptr_t kFadeDistanceScale = 0x0078F570;
+    using FadeDistanceScaleFn = void(__cdecl*)(float scale);
+
+    // Native input seeds consumed by kFadeDistanceScale.
+    constexpr uintptr_t kDistanceBand4Seed = 0x00ADF370; // 750.0 stock
+    constexpr uintptr_t kDistanceBand5Seed = 0x00ADF374; // 1250.0 stock
+
+    // Native derived live distances written by kFadeDistanceScale.
+    constexpr uintptr_t kDistanceBand4Live = 0x00ADF3AC;
+    constexpr uintptr_t kDistanceBand5Live = 0x00ADF3B0;
+
+    // Corresponding fade-start distances written by the same builder.
+    constexpr uintptr_t kDistanceBand4FadeStart = 0x00ADF3D4;
+    constexpr uintptr_t kDistanceBand5FadeStart = 0x00ADF3D8;
     /// The per-frame decision of which tile/group the viewer occupies, which drives interior vs
     /// exterior and the whole cull path - the hook for correcting viewer placement in modern WMOs.
     /// __cdecl, caller-cleaned.

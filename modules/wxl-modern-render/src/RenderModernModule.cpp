@@ -21,6 +21,7 @@
 #include "game/Camera.hpp"
 #include "engine/gpu/Proxy.hpp"
 #include "offsets/game/World.hpp"
+#include "offsets/game/WorldScene.hpp"
 #include "client/CWorldScene/RenderModernBridge.hpp"
 
 #include "gpu/Pipeline.hpp"
@@ -41,9 +42,10 @@
 // onto the native backbuffer, and the UI then draws crisp on top.
 namespace wxl::scripts::render_modern
 {
-    namespace ev   = wxl::events;
-    namespace cam  = wxl::game::camera;
-    namespace woff = wxl::offsets::game::world;
+    namespace ev    = wxl::events;
+    namespace cam   = wxl::game::camera;
+    namespace woff  = wxl::offsets::game::world;
+    namespace wsoff = wxl::offsets::game::worldscene;
 
     // R4B2-A: controlled QA extension of the native world far-clip validator.
     //
@@ -142,6 +144,132 @@ namespace wxl::scripts::render_modern
         "render-modern-r4-extended-farclip",
         true,
         InstallExtendedFarClipQa);
+
+    // R4B2-C: opt-in extension of the two largest native object-distance
+    // bands. The native distance-table builder remains authoritative for
+    // all derived fade/culling values.
+    wsoff::FadeDistanceScaleFn g_origFadeDistanceScale = nullptr;
+
+    bool ExtendedObjectDistanceEnabled()
+    {
+        static const bool enabled = []()
+        {
+            char raw[16] = {};
+
+            const DWORD n =
+                GetEnvironmentVariableA(
+                    "WXL_EXTENDED_OBJECT_DISTANCE",
+                    raw,
+                    sizeof(raw));
+
+            if (n == 0 || n >= sizeof(raw))
+                return false;
+
+            const char c = raw[0];
+
+            return c != '0' &&
+                   c != 'n' && c != 'N' &&
+                   c != 'f' && c != 'F';
+        }();
+
+        return enabled;
+    }
+
+    void __cdecl hkFadeDistanceScale(float scale)
+    {
+        if (!g_origFadeDistanceScale)
+            return;
+
+        if (!ExtendedObjectDistanceEnabled())
+        {
+            g_origFadeDistanceScale(scale);
+            return;
+        }
+
+        float* const band4Seed =
+            reinterpret_cast<float*>(
+                wsoff::kDistanceBand4Seed);
+
+        float* const band5Seed =
+            reinterpret_cast<float*>(
+                wsoff::kDistanceBand5Seed);
+
+        const float stockBand4Seed = *band4Seed;
+        const float stockBand5Seed = *band5Seed;
+
+        // At the user's stock-max scale of 1.5:
+        //
+        // 1200 * 1.5 = 1800 yd
+        // band 5 is unscaled by the native builder = 2112 yd
+        //
+        // Only the two large-object classes are extended.
+        *band4Seed = 1200.0f;
+        *band5Seed = 2112.0f;
+
+        g_origFadeDistanceScale(scale);
+
+        // Restore native seed memory immediately. The derived table written
+        // by the engine remains extended until the next rebuild.
+        *band4Seed = stockBand4Seed;
+        *band5Seed = stockBand5Seed;
+
+        static unsigned logged = 0;
+
+        if (logged < 8)
+        {
+            ++logged;
+
+            const float live4 =
+                *reinterpret_cast<const float*>(
+                    wsoff::kDistanceBand4Live);
+
+            const float live5 =
+                *reinterpret_cast<const float*>(
+                    wsoff::kDistanceBand5Live);
+
+            const float fade4 =
+                *reinterpret_cast<const float*>(
+                    wsoff::kDistanceBand4FadeStart);
+
+            const float fade5 =
+                *reinterpret_cast<const float*>(
+                    wsoff::kDistanceBand5FadeStart);
+
+            WLOG_INFO(
+                "wxl-modern-r4b2c: object distance table "
+                "scale=%.9g band4=%.9g fade4=%.9g "
+                "band5=%.9g fade5=%.9g extended=1",
+                scale,
+                live4,
+                fade4,
+                live5,
+                fade5);
+        }
+    }
+
+    bool InstallExtendedObjectDistanceQa()
+    {
+        const bool installed =
+            wxl::hook::Install(
+                "R4ExtendedObjectDistance",
+                wsoff::kFadeDistanceScale,
+                &hkFadeDistanceScale,
+                &g_origFadeDistanceScale);
+
+        if (installed)
+        {
+            WLOG_INFO(
+                "wxl-modern-r4b2c: extended object-distance QA hook "
+                "installed (band4 target=1800 band5 target=2112)");
+        }
+
+        return installed;
+    }
+
+    WXL_REGISTER_FEATURE(
+        "render-modern-r4-extended-object-distance",
+        true,
+        InstallExtendedObjectDistanceQa);
 
     /** @brief Drives the post-process pipeline once per frame from the live device. */
     class RenderModernModule : public ev::EventScript
