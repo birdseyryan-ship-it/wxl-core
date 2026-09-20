@@ -224,7 +224,58 @@ namespace wxl::scripts::render_modern::grass
             text->Release();
 
             size_t at = src.find("add r0, r0, c3");
-            if (at == std::string::npos) { WLOG_WARN("grass: injection anchor missing"); return false; }
+            if (at == std::string::npos)
+            {
+                // R4C3-B: the dormant implementation was authored against
+                // a different grass-shader permutation. Preserve the exact
+                // live shader disassembly before choosing a new injection
+                // anchor; do not guess against machine behaviour.
+                static unsigned dumpIndex = 0;
+                const unsigned index = ++dumpIndex;
+
+                CreateDirectoryA("Logs", nullptr);
+
+                char path[MAX_PATH] = {};
+                std::snprintf(
+                    path,
+                    sizeof(path),
+                    "Logs\\grass_shader_anchor_missing_%u.asm",
+                    index);
+
+                FILE* dump = nullptr;
+                const errno_t openResult =
+                    fopen_s(&dump, path, "wb");
+
+                if (openResult == 0 && dump)
+                {
+                    const size_t written =
+                        std::fwrite(
+                            src.data(),
+                            1,
+                            src.size(),
+                            dump);
+
+                    std::fclose(dump);
+
+                    WLOG_WARN(
+                        "grass: injection anchor missing; "
+                        "dumped shader=%p path=%s bytes=%u/%u",
+                        engineVS,
+                        path,
+                        static_cast<unsigned>(written),
+                        static_cast<unsigned>(src.size()));
+                }
+                else
+                {
+                    WLOG_WARN(
+                        "grass: injection anchor missing; "
+                        "shader=%p disassembly dump failed errno=%d",
+                        engineVS,
+                        static_cast<int>(openResult));
+                }
+
+                return false;
+            }
             at = src.find('\n', at);
             if (at == std::string::npos) return false;
             src.insert(at + 1, kMotionInject);
