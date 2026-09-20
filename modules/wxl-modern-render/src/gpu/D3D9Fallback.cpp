@@ -161,6 +161,31 @@ namespace wxl::scripts::render_modern::d3d9fallback
             return mode;
         }
 
+        bool AoFullResolutionTestEnabled()
+        {
+            static const bool enabled = []()
+            {
+                char raw[16] = {};
+
+                const DWORD n =
+                    GetEnvironmentVariableA(
+                        "WXL_AO_RES_TEST",
+                        raw,
+                        sizeof(raw));
+
+                if (n == 0 || n >= sizeof(raw))
+                    return false;
+
+                const char c = raw[0];
+
+                return c != '0' &&
+                       c != 'n' && c != 'N' &&
+                       c != 'f' && c != 'F';
+            }();
+
+            return enabled;
+        }
+
         int AoProofMode()
         {
             static const int mode = []()
@@ -1294,11 +1319,22 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                 fullFmt == D3DFMT_UNKNOWN)
                 return false;
 
+            // R4B1-C diagnostic only:
+            // WXL_AO_RES_TEST=1 evaluates the exact same accepted AO
+            // algorithm at full output resolution. With the selector
+            // unset, production remains the frozen R3E4B half-res path.
+            const bool fullResAo =
+                AoFullResolutionTestEnabled();
+
             const UINT aoW =
-                fullW > 1 ? fullW / 2 : 1;
+                fullResAo
+                    ? fullW
+                    : (fullW > 1 ? fullW / 2 : 1);
 
             const UINT aoH =
-                fullH > 1 ? fullH / 2 : 1;
+                fullResAo
+                    ? fullH
+                    : (fullH > 1 ? fullH / 2 : 1);
 
             if (g_aoTexture &&
                 g_aoSurface &&
@@ -1333,7 +1369,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                 !g_aoTexture)
             {
                 WLOG_ERROR(
-                    "wxl-modern-r3e4: half-res AO texture "
+                    "wxl-modern-r4b1c: AO raw texture "
                     "creation failed %ux%u hr=0x%08X",
                     aoW,
                     aoH,
@@ -1352,7 +1388,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                 !g_aoSurface)
             {
                 WLOG_ERROR(
-                    "wxl-modern-r3e4: half-res AO surface "
+                    "wxl-modern-r4b1c: AO raw surface "
                     "acquisition failed hr=0x%08X",
                     static_cast<unsigned>(hr));
 
@@ -1414,13 +1450,14 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             g_aoCompositeFormat = fullFmt;
 
             WLOG_INFO(
-                "wxl-modern-r3e4: AO targets ready "
-                "raw=%ux%u composite=%ux%u fmt=%u",
+                "wxl-modern-r4b1c: AO targets ready "
+                "raw=%ux%u composite=%ux%u fmt=%u resolution=%s",
                 g_aoWidth,
                 g_aoHeight,
                 fullW,
                 fullH,
-                static_cast<unsigned>(fullFmt));
+                static_cast<unsigned>(fullFmt),
+                fullResAo ? "full" : "half");
 
             return true;
         }
