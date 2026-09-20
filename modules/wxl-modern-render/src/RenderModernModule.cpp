@@ -60,6 +60,14 @@ namespace wxl::scripts::render_modern
         // the depth-stencil surface the world genuinely wrote into.
         IDirect3DSurface9* protonWorldDepth_ = nullptr;
 
+        // R3D3A: exact projection matrix that was live when the world scene
+        // finished, retained until the later world -> UI boundary.
+        D3DMATRIX protonWorldProjection_ = {};
+        bool protonWorldProjectionValid_ = false;
+        unsigned protonProjectionSamples_ = 0;
+        bool protonProjectionBoundaryLogged_ = false;
+        bool protonProjectionCaptureFailLogged_ = false;
+
         void ReleaseProtonWorldDepth()
         {
             if (protonWorldDepth_)
@@ -67,6 +75,29 @@ namespace wxl::scripts::render_modern
                 protonWorldDepth_->Release();
                 protonWorldDepth_ = nullptr;
             }
+        }
+
+        static bool ProjectionProbeEnabled()
+        {
+            static const bool enabled = []()
+            {
+                char raw[16] = {};
+                const DWORD n = GetEnvironmentVariableA(
+                    "WXL_PROJECTION_PROBE",
+                    raw,
+                    sizeof(raw));
+
+                if (n == 0 || n >= sizeof(raw))
+                    return false;
+
+                const char c = raw[0];
+
+                return c != '0' &&
+                       c != 'n' && c != 'N' &&
+                       c != 'f' && c != 'F';
+            }();
+
+            return enabled;
         }
 
         void OnWorldSceneEnd(const ev::WorldSceneEndArgs& a)
@@ -84,11 +115,113 @@ namespace wxl::scripts::render_modern
 
             ReleaseProtonWorldDepth();
             protonWorldDepth_ = depth;
+
+            IDirect3DDevice9* device =
+                static_cast<IDirect3DDevice9*>(a.device);
+
+            D3DMATRIX projection = {};
+
+            const HRESULT projectionHr =
+                device
+                    ? device->GetTransform(
+                          D3DTS_PROJECTION,
+                          &projection)
+                    : E_POINTER;
+
+            if (SUCCEEDED(projectionHr))
+            {
+                protonWorldProjection_ = projection;
+                protonWorldProjectionValid_ = true;
+
+                if (ProjectionProbeEnabled())
+                {
+                    ++protonProjectionSamples_;
+
+                    // Six samples, roughly two seconds apart at 60 FPS.
+                    // This is enough to move/rotate/zoom the camera and
+                    // establish whether the projection authority remains sane.
+                    const bool logSample =
+                        protonProjectionSamples_ == 1 ||
+                        (protonProjectionSamples_ <= 601 &&
+                         ((protonProjectionSamples_ - 1) % 120) == 0);
+
+                    if (logSample)
+                    {
+                        const float* m =
+                            reinterpret_cast<const float*>(
+                                &protonWorldProjection_);
+
+                        const float aZ = m[10];
+                        const float bZ = m[14];
+                        const float farDenom = 1.0f - aZ;
+
+                        const float nearPlane =
+                            aZ != 0.0f
+                                ? (-bZ / aZ)
+                                : 0.0f;
+
+                        const float farPlane =
+                            farDenom != 0.0f
+                                ? (bZ / farDenom)
+                                : 0.0f;
+
+                        if (protonProjectionSamples_ == 1)
+                        {
+                            WLOG_INFO(
+                                "wxl-modern-r3d3a: projection matrix "
+                                "m=[%.9g %.9g %.9g %.9g | "
+                                "%.9g %.9g %.9g %.9g | "
+                                "%.9g %.9g %.9g %.9g | "
+                                "%.9g %.9g %.9g %.9g]",
+                                m[0],  m[1],  m[2],  m[3],
+                                m[4],  m[5],  m[6],  m[7],
+                                m[8],  m[9],  m[10], m[11],
+                                m[12], m[13], m[14], m[15]);
+                        }
+
+                        WLOG_INFO(
+                            "wxl-modern-r3d3a: projection sample=%u "
+                            "xScale=%.9g yScale=%.9g "
+                            "A=%.9g B=%.9g near=%.9g far=%.9g "
+                            "m11=%.9g m15=%.9g",
+                            protonProjectionSamples_,
+                            m[0],
+                            m[5],
+                            aZ,
+                            bZ,
+                            nearPlane,
+                            farPlane,
+                            m[11],
+                            m[15]);
+                    }
+                }
+            }
+            else
+            {
+                protonWorldProjectionValid_ = false;
+
+                if (ProjectionProbeEnabled() &&
+                    !protonProjectionCaptureFailLogged_)
+                {
+                    protonProjectionCaptureFailLogged_ = true;
+
+                    WLOG_ERROR(
+                        "wxl-modern-r3d3a: projection capture FAIL "
+                        "hr=0x%08X",
+                        static_cast<unsigned>(projectionHr));
+                }
+            }
         }
 
         void OnDeviceLost(const ev::DeviceResetArgs&)
         {
             ReleaseProtonWorldDepth();
+
+            protonWorldProjectionValid_ = false;
+            protonProjectionSamples_ = 0;
+            protonProjectionBoundaryLogged_ = false;
+            protonProjectionCaptureFailLogged_ = false;
+
             d3d9fallback::PrepareForReset();
             Pipeline::Get().PrepareForReset();
         }
@@ -157,6 +290,26 @@ namespace wxl::scripts::render_modern
 
                 protonWorldDepth_ = nullptr;
 
+                if (ProjectionProbeEnabled() &&
+                    protonWorldProjectionValid_ &&
+                    !protonProjectionBoundaryLogged_)
+                {
+                    const float* m =
+                        reinterpret_cast<const float*>(
+                            &protonWorldProjection_);
+
+                    WLOG_INFO(
+                        "wxl-modern-r3d3a: projection snapshot retained "
+                        "to world-ui boundary A=%.9g B=%.9g "
+                        "xScale=%.9g yScale=%.9g",
+                        m[10],
+                        m[14],
+                        m[0],
+                        m[5]);
+
+                    protonProjectionBoundaryLogged_ = true;
+                }
+
                 d3d9fallback::Frame(
                     device,
                     fxaaEnabled,
@@ -167,6 +320,10 @@ namespace wxl::scripts::render_modern
 
                 if (frameWorldDepth)
                     frameWorldDepth->Release();
+
+                // R3D3A snapshot is frame-scoped. The next world scene
+                // completion will supply the next authoritative projection.
+                protonWorldProjectionValid_ = false;
 
                 return;
             }
