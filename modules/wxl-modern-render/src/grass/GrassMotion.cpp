@@ -223,7 +223,20 @@ namespace wxl::scripts::render_modern::grass
             std::string src(static_cast<const char*>(text->GetBufferPointer()));
             text->Release();
 
+            // The live 3.3.5a D3DDisassemble output spells the same
+            // view-position completion instruction with explicit masks/swizzles.
+            // Accept both spellings, but do not broaden this into a fuzzy anchor:
+            // the second live permutation has been captured and verified to place
+            // this instruction immediately before projection.
             size_t at = src.find("add r0, r0, c3");
+            bool liveExplicitAnchor = false;
+
+            if (at == std::string::npos)
+            {
+                at = src.find("add r0.xyzw, r0.xyzw, c3.xyzw");
+                liveExplicitAnchor = at != std::string::npos;
+            }
+
             if (at == std::string::npos)
             {
                 // R4C3-B: the dormant implementation was authored against
@@ -276,6 +289,12 @@ namespace wxl::scripts::render_modern::grass
 
                 return false;
             }
+
+            WLOG_INFO(
+                "grass: motion injection anchor matched form=%s shader=%p",
+                liveExplicitAnchor ? "live-explicit-swizzle" : "legacy",
+                engineVS);
+
             at = src.find('\n', at);
             if (at == std::string::npos) return false;
             src.insert(at + 1, kMotionInject);
