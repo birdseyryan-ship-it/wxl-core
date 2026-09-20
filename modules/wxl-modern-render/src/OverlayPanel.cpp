@@ -56,7 +56,21 @@ namespace wxl::scripts::render_modern
                 if (proof)
                     ImGui::TextColored(
                         ImVec4(1.0f, 0.7f, 0.3f, 1.0f),
-                        "Diagnostic tint active; FXAA/SMAA are temporarily bypassed.");
+                        "Diagnostic tint active; production post-FX are temporarily bypassed.");
+
+                bool ao =
+                    d3d9fallback::AmbientOcclusion();
+
+                if (ImGui::Checkbox(
+                        "Ambient Occlusion (Classic Enhanced)",
+                        &ao))
+                {
+                    d3d9fallback::SetAmbientOcclusion(ao);
+                }
+
+                if (ao)
+                    ImGui::TextDisabled(
+                        "CE AO: accepted R3E3 Preset 2; runs before AA.");
 
                 ImGui::TextDisabled(
                     "Engine MSAA is resolved to a single-sample world image before post-FX.");
@@ -121,7 +135,7 @@ namespace wxl::scripts::render_modern
             ImGui::Separator();
             if (protonFallback)
                 ImGui::TextDisabled(
-                    "R3C: CMAA2, SSAO and Render Scale remain locked.");
+                    "R3E4: CE AO available; CMAA2 and Render Scale remain locked.");
             else
                 ImGui::TextDisabled(
                     "R3: SSAO and Render Scale locked pending readable-depth validation.");

@@ -61,10 +61,16 @@ namespace wxl::scripts::render_modern::d3d9fallback
         IDirect3DPixelShader9* g_aoDenoiseShader = nullptr;
         IDirect3DPixelShader9* g_fxaaShader[3] = { nullptr, nullptr, nullptr };
 
-        // R3E2: raw AO is evaluated at half resolution, then depth-aware
+        // R3E2+: raw AO is evaluated at half resolution, then depth-aware
         // denoised/upsampled while compositing at full resolution.
         IDirect3DTexture9*     g_aoTexture = nullptr;
         IDirect3DSurface9*     g_aoSurface = nullptr;
+
+        // R3E4: full-resolution AO-composited world image. When an AA method
+        // is active, AO writes here first and SMAA/FXAA consumes this texture.
+        IDirect3DTexture9*     g_aoCompositeTexture = nullptr;
+        IDirect3DSurface9*     g_aoCompositeSurface = nullptr;
+        D3DFORMAT              g_aoCompositeFormat = D3DFMT_UNKNOWN;
 
         UINT      g_width = 0;
         UINT      g_height = 0;
@@ -77,6 +83,10 @@ namespace wxl::scripts::render_modern::d3d9fallback
         UINT      g_aoHeight = 0;
 
         bool g_proofTint = false;
+
+        // Accepted Classic Enhanced R3E3 Preset 2 is production-default ON.
+        bool g_ambientOcclusion = true;
+
         int  g_lastLoggedMode = -1;
         int  g_lastLoggedTier = -1;
         bool g_loggedEndFail = false;
@@ -90,6 +100,7 @@ namespace wxl::scripts::render_modern::d3d9fallback
         bool g_loggedDepthMode = false;
         bool g_loggedAoMode = false;
         bool g_loggedAoProjection = false;
+        bool g_loggedAoProduction = false;
 
         struct FsVertex
         {
@@ -213,6 +224,10 @@ namespace wxl::scripts::render_modern::d3d9fallback
             SafeRelease(g_aoSurface);
             SafeRelease(g_aoTexture);
 
+            SafeRelease(g_aoCompositeSurface);
+            SafeRelease(g_aoCompositeTexture);
+            g_aoCompositeFormat = D3DFMT_UNKNOWN;
+
             SafeRelease(g_depthPlainSurface);
             SafeRelease(g_depthSurface);
             SafeRelease(g_depthTexture);
@@ -257,6 +272,7 @@ namespace wxl::scripts::render_modern::d3d9fallback
             g_loggedDepthMode = false;
             g_loggedAoMode = false;
             g_loggedAoProjection = false;
+            g_loggedAoProduction = false;
         }
 
         bool CompilePixelShader(IDirect3DDevice9* dev,
@@ -1195,9 +1211,13 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
         bool EnsureAoTarget(
             IDirect3DDevice9* dev,
             UINT fullW,
-            UINT fullH)
+            UINT fullH,
+            D3DFORMAT fullFmt)
         {
-            if (!dev || !fullW || !fullH)
+            if (!dev ||
+                !fullW ||
+                !fullH ||
+                fullFmt == D3DFMT_UNKNOWN)
                 return false;
 
             const UINT aoW =
@@ -1208,17 +1228,23 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
 
             if (g_aoTexture &&
                 g_aoSurface &&
+                g_aoCompositeTexture &&
+                g_aoCompositeSurface &&
                 g_aoWidth == aoW &&
-                g_aoHeight == aoH)
+                g_aoHeight == aoH &&
+                g_aoCompositeFormat == fullFmt)
                 return true;
 
             SafeRelease(g_aoSurface);
             SafeRelease(g_aoTexture);
+            SafeRelease(g_aoCompositeSurface);
+            SafeRelease(g_aoCompositeTexture);
 
             g_aoWidth = 0;
             g_aoHeight = 0;
+            g_aoCompositeFormat = D3DFMT_UNKNOWN;
 
-            const HRESULT createHr =
+            HRESULT hr =
                 dev->CreateTexture(
                     aoW,
                     aoH,
@@ -1229,48 +1255,98 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                     &g_aoTexture,
                     nullptr);
 
-            if (FAILED(createHr) ||
+            if (FAILED(hr) ||
                 !g_aoTexture)
             {
                 WLOG_ERROR(
-                    "wxl-modern-r3e2: half-res AO texture "
+                    "wxl-modern-r3e4: half-res AO texture "
                     "creation failed %ux%u hr=0x%08X",
                     aoW,
                     aoH,
-                    static_cast<unsigned>(createHr));
+                    static_cast<unsigned>(hr));
 
                 SafeRelease(g_aoTexture);
                 return false;
             }
 
-            const HRESULT surfaceHr =
+            hr =
                 g_aoTexture->GetSurfaceLevel(
                     0,
                     &g_aoSurface);
 
-            if (FAILED(surfaceHr) ||
+            if (FAILED(hr) ||
                 !g_aoSurface)
             {
                 WLOG_ERROR(
-                    "wxl-modern-r3e2: half-res AO surface "
+                    "wxl-modern-r3e4: half-res AO surface "
                     "acquisition failed hr=0x%08X",
-                    static_cast<unsigned>(surfaceHr));
+                    static_cast<unsigned>(hr));
 
                 SafeRelease(g_aoSurface);
                 SafeRelease(g_aoTexture);
                 return false;
             }
 
+            hr =
+                dev->CreateTexture(
+                    fullW,
+                    fullH,
+                    1,
+                    D3DUSAGE_RENDERTARGET,
+                    fullFmt,
+                    D3DPOOL_DEFAULT,
+                    &g_aoCompositeTexture,
+                    nullptr);
+
+            if (FAILED(hr) ||
+                !g_aoCompositeTexture)
+            {
+                WLOG_ERROR(
+                    "wxl-modern-r3e4: AO composite texture "
+                    "creation failed %ux%u fmt=%u hr=0x%08X",
+                    fullW,
+                    fullH,
+                    static_cast<unsigned>(fullFmt),
+                    static_cast<unsigned>(hr));
+
+                SafeRelease(g_aoSurface);
+                SafeRelease(g_aoTexture);
+                SafeRelease(g_aoCompositeTexture);
+                return false;
+            }
+
+            hr =
+                g_aoCompositeTexture->GetSurfaceLevel(
+                    0,
+                    &g_aoCompositeSurface);
+
+            if (FAILED(hr) ||
+                !g_aoCompositeSurface)
+            {
+                WLOG_ERROR(
+                    "wxl-modern-r3e4: AO composite surface "
+                    "acquisition failed hr=0x%08X",
+                    static_cast<unsigned>(hr));
+
+                SafeRelease(g_aoSurface);
+                SafeRelease(g_aoTexture);
+                SafeRelease(g_aoCompositeSurface);
+                SafeRelease(g_aoCompositeTexture);
+                return false;
+            }
+
             g_aoWidth = aoW;
             g_aoHeight = aoH;
+            g_aoCompositeFormat = fullFmt;
 
             WLOG_INFO(
-                "wxl-modern-r3e2: half-res AO target ready "
-                "%ux%u from %ux%u",
+                "wxl-modern-r3e4: AO targets ready "
+                "raw=%ux%u composite=%ux%u fmt=%u",
                 g_aoWidth,
                 g_aoHeight,
                 fullW,
-                fullH);
+                fullH,
+                static_cast<unsigned>(fullFmt));
 
             return true;
         }
@@ -1316,6 +1392,20 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                   enabled ? "enabled" : "disabled");
     }
 
+    bool AmbientOcclusion()
+    {
+        return g_ambientOcclusion;
+    }
+
+    void SetAmbientOcclusion(bool enabled)
+    {
+        g_ambientOcclusion = enabled;
+
+        WLOG_INFO(
+            "wxl-modern-r3e4: Classic Enhanced AO %s",
+            enabled ? "enabled" : "disabled");
+    }
+
     void PrepareForReset()
     {
         if (Available())
@@ -1350,8 +1440,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
 
         const int requestedAoProofMode = AoProofMode();
 
-        // Existing depth diagnostics deliberately take precedence when both
-        // environment switches are supplied.
+        // Existing depth diagnostics deliberately take precedence.
         const bool aoProof =
             !depthProof &&
             requestedAoProofMode > 0;
@@ -1362,9 +1451,41 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
         const int aoTuneMode =
             AoTuneMode();
 
-        const bool needReadableDepth =
-            depthProof || aoProof;
+        // R3E4 production AO is independent of the diagnostic environment
+        // switches and defaults ON for Classic Enhanced.
+        bool productionAo =
+            !depthProof &&
+            !aoProof &&
+            !g_proofTint &&
+            g_ambientOcclusion;
 
+        // Production should degrade gracefully to colour-only AA if a single
+        // frame ever arrives without the retained world depth/projection.
+        if (productionAo &&
+            (!worldDepth || !worldProjection))
+        {
+            static bool loggedProductionAoFallback = false;
+
+            if (!loggedProductionAoFallback)
+            {
+                loggedProductionAoFallback = true;
+
+                WLOG_WARN(
+                    "wxl-modern-r3e4: production AO unavailable for "
+                    "frame; falling back to colour-only AA");
+            }
+
+            productionAo = false;
+        }
+
+        const bool aoActive =
+            aoProof || productionAo;
+
+        const bool needReadableDepth =
+            depthProof || aoActive;
+
+        // Diagnostic proof modes remain strict: missing authority is a failed
+        // proof rather than a silent fallback.
         if (((depthMode == 7 || depthMode == 8) || aoProof) &&
             !worldProjection)
         {
@@ -1391,7 +1512,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                 loggedMissingAoDepth = true;
 
                 WLOG_ERROR(
-                    "wxl-modern-r3e1: AO requires the captured "
+                    "wxl-modern-r3e4: AO proof requires the captured "
                     "world-depth surface");
             }
 
@@ -1403,9 +1524,19 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             g_loggedAoMode = true;
 
             WLOG_INFO(
-                "wxl-modern-r3e1: AO proof mode=%d "
+                "wxl-modern-r3e4: AO proof mode=%d "
                 "(1=mask 2=composite)",
                 aoProofMode);
+        }
+
+        if (productionAo &&
+            !g_loggedAoProduction)
+        {
+            g_loggedAoProduction = true;
+
+            WLOG_INFO(
+                "wxl-modern-r3e4: production CE AO enabled "
+                "preset=2 chain-before-AA");
         }
 
         if (depthProof && !g_loggedDepthMode)
@@ -1418,7 +1549,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
         }
 
         if (!depthProof &&
-            !aoProof &&
+            !aoActive &&
             !g_proofTint &&
             !fxaaEnabled &&
             !smaaEnabled)
@@ -1434,8 +1565,8 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
         const int smaaTier = std::max(
             0, std::min(2, static_cast<int>(smaaQuality)));
 
-        // The panel makes these mutually exclusive. If an external caller ever
-        // enables both, prefer SMAA so there is still exactly one AA pass.
+        // The panel makes the AA methods mutually exclusive. If an external
+        // caller enables both, SMAA still wins.
         const bool useSmaa =
             !depthProof &&
             !aoProof &&
@@ -1451,7 +1582,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
 
             shader = g_depthProofShader;
         }
-        else if (aoProof)
+        else if (aoActive)
         {
             if (!EnsureAoProofShader(device) ||
                 !EnsureAoDenoiseShader(device))
@@ -1486,11 +1617,12 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             return false;
         }
 
-        if (aoProof &&
+        if (aoActive &&
             !EnsureAoTarget(
                 device,
                 bbDesc.Width,
-                bbDesc.Height))
+                bbDesc.Height,
+                bbDesc.Format))
         {
             backbuffer->Release();
             return false;
@@ -1590,7 +1722,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
         if (needReadableDepth &&
             !(depthProof && depthMode == 1))
         {
-            if (aoProof ||
+            if (aoActive ||
                 depthMode == 5 ||
                 depthMode == 6 ||
                 depthMode == 7 ||
@@ -1759,6 +1891,9 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                 mode == 13 ? "ao-proof-composite" :
                 mode == 14 ? "ao-denoised-mask" :
                 mode == 15 ? "ao-denoised-composite" :
+                mode == 16 ? "ao-production" :
+                mode == 17 ? "ao-production-smaa" :
+                mode == 18 ? "ao-production-fxaa" :
                              "FXAA";
 
             WLOG_INFO(
@@ -1780,7 +1915,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
         // pass 2 = full-resolution bilateral denoise/upsample
         // ------------------------------------------------------------
 
-        if (aoProof)
+        if (aoActive)
         {
             const float projection[4] = {
                 worldProjection[0],
@@ -1788,6 +1923,14 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                 worldProjection[10],
                 worldProjection[14]
             };
+
+            // Diagnostic R3E3 sweep remains available, but normal R3E4
+            // production always resolves to the accepted Preset 2.
+            const int effectiveTuneMode =
+                aoProof ? aoTuneMode : 2;
+
+            const int aoOutputMode =
+                aoProof ? aoProofMode : 2;
 
             // R3E3 controlled contact-shaping sweep.
             //
@@ -1804,7 +1947,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             float radialFalloff  = 2.00f;
             float denoiseSharp   = 8.00f;
 
-            if (aoTuneMode == 1)
+            if (effectiveTuneMode == 1)
             {
                 // Balanced: preserve architectural depth but tighten
                 // character/object contact lobes.
@@ -1816,7 +1959,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                 radialFalloff  = 2.50f;
                 denoiseSharp   = 10.0f;
             }
-            else if (aoTuneMode == 2)
+            else if (effectiveTuneMode == 2)
             {
                 // Contact focused: likely CE target territory.
                 aoRadius       = 0.42f;
@@ -1827,7 +1970,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                 radialFalloff  = 3.00f;
                 denoiseSharp   = 10.0f;
             }
-            else if (aoTuneMode == 3)
+            else if (effectiveTuneMode == 3)
             {
                 // Tight/subtle: useful lower-bound comparison.
                 aoRadius       = 0.34f;
@@ -1968,7 +2111,8 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                 return false;
             }
 
-            // Pass 2
+            // Pass 2: denoise/upscale + composite. Production AO writes
+            // to an intermediate texture whenever a later AA pass is active.
             D3DVIEWPORT9 fullVp = {};
             fullVp.X = 0;
             fullVp.Y = 0;
@@ -1977,9 +2121,18 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             fullVp.MinZ = 0.0f;
             fullVp.MaxZ = 1.0f;
 
+            const bool aoNeedsAa =
+                productionAo &&
+                (useSmaa || fxaaEnabled);
+
+            IDirect3DSurface9* aoOutputSurface =
+                aoNeedsAa
+                    ? g_aoCompositeSurface
+                    : backbuffer;
+
             device->SetRenderTarget(
                 0,
-                backbuffer);
+                aoOutputSurface);
 
             device->SetViewport(
                 &fullVp);
@@ -2052,7 +2205,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                 projection[2],
                 projection[3],
                 denoiseSharp,
-                static_cast<float>(aoProofMode)
+                static_cast<float>(aoOutputMode)
             };
 
             device->SetPixelShaderConstantF(
@@ -2090,12 +2243,13 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                 g_loggedAoProjection = true;
 
                 WLOG_INFO(
-                    "wxl-modern-r3e3: AO tuning preset=%d "
+                    "wxl-modern-r3e4: AO path production=%d preset=%d "
                     "xScale=%.9g yScale=%.9g A=%.9g B=%.9g "
                     "radius=%.3g intensity=%.3g bias=%.3g "
                     "maxUv=%.3g power=%.3g radial=%.3g "
                     "fade=%.3g..%.3g ao=%ux%u denoiseSharp=%.3g",
-                    aoTuneMode,
+                    productionAo ? 1 : 0,
+                    effectiveTuneMode,
                     projection[0],
                     projection[1],
                     projection[2],
@@ -2113,13 +2267,13 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                     denoiseParams[2]);
             }
 
-            RestoreDeviceState(
-                device, state, oldRt, oldDepth, oldViewport);
-
             if (FAILED(denoiseDrawHr))
             {
+                RestoreDeviceState(
+                    device, state, oldRt, oldDepth, oldViewport);
+
                 WLOG_ERROR(
-                    "wxl-modern-r3e2: AO denoise/composite draw "
+                    "wxl-modern-r3e4: AO denoise/composite draw "
                     "failed hr=0x%08X",
                     static_cast<unsigned>(denoiseDrawHr));
 
@@ -2130,9 +2284,144 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                 return false;
             }
 
-            logPass(
-                aoProofMode == 1 ? 14 : 15,
-                aoProofMode);
+            // Production CE ordering:
+            //
+            //   resolved world -> AO -> AA -> UI
+            //
+            // Diagnostic AO proof modes deliberately stop before AA so the
+            // mask/composite remains directly inspectable.
+            if (productionAo &&
+                aoNeedsAa &&
+                useSmaa)
+            {
+                const bool ok =
+                    d3d9smaa::Render(
+                        device,
+                        g_aoCompositeTexture,
+                        backbuffer,
+                        bbDesc.Width,
+                        bbDesc.Height,
+                        smaaQuality);
+
+                RestoreDeviceState(
+                    device, state, oldRt, oldDepth, oldViewport);
+
+                if (ok)
+                    logPass(17, smaaTier);
+
+                SafeRelease(state);
+                SafeRelease(oldRt);
+                SafeRelease(oldDepth);
+                backbuffer->Release();
+
+                return ok;
+            }
+
+            if (productionAo &&
+                aoNeedsAa &&
+                !useSmaa &&
+                fxaaEnabled)
+            {
+                if (!EnsureFxaaShader(
+                        device,
+                        fxaaTier))
+                {
+                    RestoreDeviceState(
+                        device, state, oldRt, oldDepth, oldViewport);
+
+                    SafeRelease(state);
+                    SafeRelease(oldRt);
+                    SafeRelease(oldDepth);
+                    backbuffer->Release();
+                    return false;
+                }
+
+                device->SetRenderTarget(
+                    0,
+                    backbuffer);
+
+                device->SetDepthStencilSurface(
+                    nullptr);
+
+                device->SetViewport(
+                    &fullVp);
+
+                device->SetVertexShader(nullptr);
+                device->SetPixelShader(
+                    g_fxaaShader[fxaaTier]);
+                device->SetFVF(kFsFvf);
+
+                device->SetTexture(
+                    0,
+                    static_cast<IDirect3DBaseTexture9*>(
+                        g_aoCompositeTexture));
+
+                device->SetSamplerState(
+                    0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+                device->SetSamplerState(
+                    0, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+                device->SetSamplerState(
+                    0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
+                device->SetSamplerState(
+                    0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
+                device->SetSamplerState(
+                    0, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
+                device->SetSamplerState(
+                    0, D3DSAMP_SRGBTEXTURE, FALSE);
+
+                const float rcpFrame[4] = {
+                    1.0f / static_cast<float>(bbDesc.Width),
+                    1.0f / static_cast<float>(bbDesc.Height),
+                    0.0f,
+                    0.0f
+                };
+
+                device->SetPixelShaderConstantF(
+                    0,
+                    rcpFrame,
+                    1);
+
+                const HRESULT fxaaDrawHr =
+                    device->DrawPrimitiveUP(
+                        D3DPT_TRIANGLESTRIP,
+                        2,
+                        fullQuad,
+                        sizeof(FsVertex));
+
+                device->SetTexture(0, nullptr);
+
+                RestoreDeviceState(
+                    device, state, oldRt, oldDepth, oldViewport);
+
+                if (SUCCEEDED(fxaaDrawHr))
+                    logPass(18, fxaaTier);
+                else
+                    WLOG_ERROR(
+                        "wxl-modern-r3e4: AO -> FXAA draw failed "
+                        "hr=0x%08X",
+                        static_cast<unsigned>(fxaaDrawHr));
+
+                SafeRelease(state);
+                SafeRelease(oldRt);
+                SafeRelease(oldDepth);
+                backbuffer->Release();
+
+                return SUCCEEDED(fxaaDrawHr);
+            }
+
+            RestoreDeviceState(
+                device, state, oldRt, oldDepth, oldViewport);
+
+            if (aoProof)
+            {
+                logPass(
+                    aoProofMode == 1 ? 14 : 15,
+                    aoProofMode);
+            }
+            else
+            {
+                logPass(16, 2);
+            }
 
             SafeRelease(state);
             SafeRelease(oldRt);
