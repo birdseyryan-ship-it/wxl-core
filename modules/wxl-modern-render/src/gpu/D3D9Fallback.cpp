@@ -106,7 +106,7 @@ namespace wxl::scripts::render_modern::d3d9fallback
                 if (modeLen > 0 &&
                     modeLen < sizeof(modeValue) &&
                     modeValue[0] >= '1' &&
-                    modeValue[0] <= '5')
+                    modeValue[0] <= '6')
                 {
                     return static_cast<int>(
                         modeValue[0] - '0');
