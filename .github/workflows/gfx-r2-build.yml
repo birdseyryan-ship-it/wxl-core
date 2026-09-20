@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - gfx-r3-modern-aa
+      - gfx-r4-environment
   workflow_dispatch:
 
 permissions:
