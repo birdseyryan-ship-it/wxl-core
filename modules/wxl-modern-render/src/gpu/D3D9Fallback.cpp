@@ -106,7 +106,7 @@ namespace wxl::scripts::render_modern::d3d9fallback
                 if (modeLen > 0 &&
                     modeLen < sizeof(modeValue) &&
                     modeValue[0] >= '1' &&
-                    modeValue[0] <= '7')
+                    modeValue[0] <= '8')
                 {
                     return static_cast<int>(
                         modeValue[0] - '0');
@@ -286,6 +286,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             // mode 5 = two-stage copy, expanded far-depth detail
             // mode 6 = two-stage copy, graded nonlinear depth proof
             // mode 7 = two-stage copy, reconstructed linear view-Z proof
+            // mode 8 = reconstructed view-Z in obvious 10-unit bands
             static const char* kDepthProofPs = R"HLSL(
 sampler2D depthTex : register(s0);
 float4 proofMode : register(c1);
@@ -310,6 +311,26 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
         // the tiny (1-depth) range aggressively so real structure cannot
         // hide in an almost-white raw image.
         v = saturate((1.0 - d) * 4096.0);
+    }
+    else if (mode >= 7.5)
+    {
+        // Same reconstructed linear view-Z as mode 7, but deliberately
+        // quantised into eight 10-unit bands across 0..80 units.
+        // This makes monotonic camera-space distance visually unambiguous.
+        float denom = d - depthProjection.x;
+        float safeDenom =
+            abs(denom) > 1.0e-7 ? denom : -1.0e-7;
+
+        float viewZ =
+            max(depthProjection.y / safeDenom, 0.0);
+
+        float normalized =
+            saturate(viewZ / depthProjection.z);
+
+        float band =
+            floor(normalized * 8.0) / 8.0;
+
+        v = 1.0 - band;
     }
     else if (mode >= 6.5)
     {
@@ -771,7 +792,8 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
         const int depthMode = DepthProofMode();
         const bool depthProof = depthMode > 0;
 
-        if (depthMode == 7 && !worldProjection)
+        if ((depthMode == 7 || depthMode == 8) &&
+            !worldProjection)
         {
             static bool loggedMissingProjection = false;
 
@@ -950,7 +972,8 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
         {
             if (depthMode == 5 ||
                 depthMode == 6 ||
-                depthMode == 7)
+                depthMode == 7 ||
+                depthMode == 8)
             {
                 const HRESULT stage1 =
                     device->StretchRect(
@@ -1108,7 +1131,8 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                 mode == 7 ? "depth-two-stage" :
                 mode == 8 ? "depth-two-stage-graded" :
                 mode == 9 ? "depth-linear-viewz" :
-                            "FXAA";
+                mode == 10 ? "depth-viewz-bands" :
+                             "FXAA";
 
             WLOG_INFO(
                 "wxl-modern-d3d9: post-process frame PASS "
@@ -1237,7 +1261,8 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                 proofMode,
                 1);
 
-            if (depthMode == 7 && worldProjection)
+            if ((depthMode == 7 || depthMode == 8) &&
+                worldProjection)
             {
                 const float aZ = worldProjection[10];
                 const float bZ = worldProjection[14];
@@ -1253,10 +1278,13 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                         ? (bZ / farDenom)
                         : 0.0f;
 
+                const float proofRange =
+                    depthMode == 8 ? 80.0f : 200.0f;
+
                 const float depthProjection[4] = {
                     aZ,
                     bZ,
-                    200.0f,
+                    proofRange,
                     farPlane
                 };
 
@@ -1274,11 +1302,13 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                     WLOG_INFO(
                         "wxl-modern-r3d3b: linear view-Z "
                         "A=%.9g B=%.9g near=%.9g far=%.9g "
-                        "proofRange=200",
+                        "proofRange=%.9g mode=%d",
                         aZ,
                         bZ,
                         nearPlane,
-                        farPlane);
+                        farPlane,
+                        proofRange,
+                        depthMode);
                 }
             }
         }
