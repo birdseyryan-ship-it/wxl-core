@@ -106,7 +106,7 @@ namespace wxl::scripts::render_modern::d3d9fallback
                 if (modeLen > 0 &&
                     modeLen < sizeof(modeValue) &&
                     modeValue[0] >= '1' &&
-                    modeValue[0] <= '6')
+                    modeValue[0] <= '7')
                 {
                     return static_cast<int>(
                         modeValue[0] - '0');
@@ -285,9 +285,14 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             // mode 4 = direct world-depth copy, expanded far-depth detail
             // mode 5 = two-stage copy, expanded far-depth detail
             // mode 6 = two-stage copy, graded nonlinear depth proof
+            // mode 7 = two-stage copy, reconstructed linear view-Z proof
             static const char* kDepthProofPs = R"HLSL(
 sampler2D depthTex : register(s0);
 float4 proofMode : register(c1);
+float4 depthProjection : register(c2);
+// depthProjection.x = A
+// depthProjection.y = B
+// depthProjection.z = linear proof range
 
 float4 main(float2 uv : TEXCOORD0) : COLOR0
 {
@@ -305,6 +310,25 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
         // the tiny (1-depth) range aggressively so real structure cannot
         // hide in an almost-white raw image.
         v = saturate((1.0 - d) * 4096.0);
+    }
+    else if (mode >= 6.5)
+    {
+        // For the validated WoW D3D perspective matrix:
+        //
+        //     depth = A + B / viewZ
+        //     viewZ = B / (depth - A)
+        //
+        // Display the first 200 view-space units linearly:
+        // near = white, 200+ = black.
+        float denom = d - depthProjection.x;
+        float safeDenom =
+            abs(denom) > 1.0e-7 ? denom : -1.0e-7;
+
+        float viewZ =
+            depthProjection.y / safeDenom;
+
+        v = saturate(
+            1.0 - max(viewZ, 0.0) / depthProjection.z);
     }
     else if (mode >= 5.5)
     {
@@ -726,7 +750,8 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                Quality fxaaQuality,
                bool smaaEnabled,
                Quality smaaQuality,
-               IDirect3DSurface9* worldDepth)
+               IDirect3DSurface9* worldDepth,
+               const float* worldProjection)
     {
         if (!Available() || !device)
             return false;
@@ -745,6 +770,22 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
 
         const int depthMode = DepthProofMode();
         const bool depthProof = depthMode > 0;
+
+        if (depthMode == 7 && !worldProjection)
+        {
+            static bool loggedMissingProjection = false;
+
+            if (!loggedMissingProjection)
+            {
+                loggedMissingProjection = true;
+
+                WLOG_ERROR(
+                    "wxl-modern-r3d3b: linear depth requires "
+                    "the retained world projection");
+            }
+
+            return false;
+        }
 
         if (depthProof && !g_loggedDepthMode)
         {
@@ -907,7 +948,9 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
 
         if (depthProof && depthMode != 1)
         {
-            if (depthMode == 5 || depthMode == 6)
+            if (depthMode == 5 ||
+                depthMode == 6 ||
+                depthMode == 7)
             {
                 const HRESULT stage1 =
                     device->StretchRect(
@@ -1064,6 +1107,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                 mode == 6 ? "depth-expand" :
                 mode == 7 ? "depth-two-stage" :
                 mode == 8 ? "depth-two-stage-graded" :
+                mode == 9 ? "depth-linear-viewz" :
                             "FXAA";
 
             WLOG_INFO(
@@ -1192,6 +1236,51 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                 1,
                 proofMode,
                 1);
+
+            if (depthMode == 7 && worldProjection)
+            {
+                const float aZ = worldProjection[10];
+                const float bZ = worldProjection[14];
+                const float farDenom = 1.0f - aZ;
+
+                const float nearPlane =
+                    aZ != 0.0f
+                        ? (-bZ / aZ)
+                        : 0.0f;
+
+                const float farPlane =
+                    farDenom != 0.0f
+                        ? (bZ / farDenom)
+                        : 0.0f;
+
+                const float depthProjection[4] = {
+                    aZ,
+                    bZ,
+                    200.0f,
+                    farPlane
+                };
+
+                device->SetPixelShaderConstantF(
+                    2,
+                    depthProjection,
+                    1);
+
+                static bool loggedLinearProjection = false;
+
+                if (!loggedLinearProjection)
+                {
+                    loggedLinearProjection = true;
+
+                    WLOG_INFO(
+                        "wxl-modern-r3d3b: linear view-Z "
+                        "A=%.9g B=%.9g near=%.9g far=%.9g "
+                        "proofRange=200",
+                        aZ,
+                        bZ,
+                        nearPlane,
+                        farPlane);
+                }
+            }
         }
 
         const float w =

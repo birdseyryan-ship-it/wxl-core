@@ -305,13 +305,20 @@ namespace wxl::scripts::render_modern
                     protonProjectionBoundaryLogged_ = true;
                 }
 
+                const float* frameWorldProjection =
+                    protonWorldProjectionValid_
+                        ? reinterpret_cast<const float*>(
+                              &protonWorldProjection_)
+                        : nullptr;
+
                 d3d9fallback::Frame(
                     device,
                     fxaaEnabled,
                     fxaaQuality,
                     smaaEnabled,
                     smaaQuality,
-                    frameWorldDepth);
+                    frameWorldDepth,
+                    frameWorldProjection);
 
                 if (frameWorldDepth)
                     frameWorldDepth->Release();

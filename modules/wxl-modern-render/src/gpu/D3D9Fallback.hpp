@@ -26,5 +26,6 @@ namespace wxl::scripts::render_modern::d3d9fallback
                Quality fxaaQuality,
                bool smaaEnabled,
                Quality smaaQuality,
-               IDirect3DSurface9* worldDepth);
+               IDirect3DSurface9* worldDepth,
+               const float* worldProjection);
 }
