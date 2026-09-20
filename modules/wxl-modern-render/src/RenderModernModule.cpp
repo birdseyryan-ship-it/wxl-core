@@ -145,9 +145,13 @@ namespace wxl::scripts::render_modern
         true,
         InstallExtendedFarClipQa);
 
-    // R4B2-C: opt-in extension of the two largest native object-distance
-    // bands. The native distance-table builder remains authoritative for
-    // all derived fade/culling values.
+    // R4B2-D: opt-in proportional extension of the complete native
+    // five-band object-distance hierarchy to the 2112-yard world horizon.
+    //
+    // The stock maximum live range is 1250 yards, so every seed is
+    // multiplied by 2112/1250 = 1.6896. The native builder remains
+    // authoritative for environmentDetail scaling, fade starts and squared
+    // culling thresholds.
     wsoff::FadeDistanceScaleFn g_origFadeDistanceScale = nullptr;
 
     bool ExtendedObjectDistanceEnabled()
@@ -186,30 +190,38 @@ namespace wxl::scripts::render_modern
             return;
         }
 
+        float* const band1Seed =
+            reinterpret_cast<float*>(wsoff::kDistanceBand1Seed);
+        float* const band2Seed =
+            reinterpret_cast<float*>(wsoff::kDistanceBand2Seed);
+        float* const band3Seed =
+            reinterpret_cast<float*>(wsoff::kDistanceBand3Seed);
         float* const band4Seed =
-            reinterpret_cast<float*>(
-                wsoff::kDistanceBand4Seed);
-
+            reinterpret_cast<float*>(wsoff::kDistanceBand4Seed);
         float* const band5Seed =
-            reinterpret_cast<float*>(
-                wsoff::kDistanceBand5Seed);
+            reinterpret_cast<float*>(wsoff::kDistanceBand5Seed);
 
+        const float stockBand1Seed = *band1Seed;
+        const float stockBand2Seed = *band2Seed;
+        const float stockBand3Seed = *band3Seed;
         const float stockBand4Seed = *band4Seed;
         const float stockBand5Seed = *band5Seed;
 
-        // At the user's stock-max scale of 1.5:
-        //
-        // 1200 * 1.5 = 1800 yd
-        // band 5 is unscaled by the native builder = 2112 yd
-        //
-        // Only the two large-object classes are extended.
-        *band4Seed = 1200.0f;
-        *band5Seed = 2112.0f;
+        constexpr float kHorizonScale = 2112.0f / 1250.0f;
+
+        *band1Seed = stockBand1Seed * kHorizonScale;
+        *band2Seed = stockBand2Seed * kHorizonScale;
+        *band3Seed = stockBand3Seed * kHorizonScale;
+        *band4Seed = stockBand4Seed * kHorizonScale;
+        *band5Seed = stockBand5Seed * kHorizonScale;
 
         g_origFadeDistanceScale(scale);
 
-        // Restore native seed memory immediately. The derived table written
-        // by the engine remains extended until the next rebuild.
+        // Restore native seed memory immediately. Only the engine-built live
+        // table remains extended until its next rebuild.
+        *band1Seed = stockBand1Seed;
+        *band2Seed = stockBand2Seed;
+        *band3Seed = stockBand3Seed;
         *band4Seed = stockBand4Seed;
         *band5Seed = stockBand5Seed;
 
@@ -219,30 +231,57 @@ namespace wxl::scripts::render_modern
         {
             ++logged;
 
+            const float live1 =
+                *reinterpret_cast<const float*>(
+                    wsoff::kDistanceBand1Live);
+            const float live2 =
+                *reinterpret_cast<const float*>(
+                    wsoff::kDistanceBand2Live);
+            const float live3 =
+                *reinterpret_cast<const float*>(
+                    wsoff::kDistanceBand3Live);
             const float live4 =
                 *reinterpret_cast<const float*>(
                     wsoff::kDistanceBand4Live);
-
             const float live5 =
                 *reinterpret_cast<const float*>(
                     wsoff::kDistanceBand5Live);
 
+            const float fade1 =
+                *reinterpret_cast<const float*>(
+                    wsoff::kDistanceBand1FadeStart);
+            const float fade2 =
+                *reinterpret_cast<const float*>(
+                    wsoff::kDistanceBand2FadeStart);
+            const float fade3 =
+                *reinterpret_cast<const float*>(
+                    wsoff::kDistanceBand3FadeStart);
             const float fade4 =
                 *reinterpret_cast<const float*>(
                     wsoff::kDistanceBand4FadeStart);
-
             const float fade5 =
                 *reinterpret_cast<const float*>(
                     wsoff::kDistanceBand5FadeStart);
 
             WLOG_INFO(
-                "wxl-modern-r4b2c: object distance table "
-                "scale=%.9g band4=%.9g fade4=%.9g "
-                "band5=%.9g fade5=%.9g extended=1",
+                "wxl-modern-r4b2d: object distances "
+                "scale=%.9g factor=%.9g "
+                "b1=%.9g b2=%.9g b3=%.9g b4=%.9g b5=%.9g",
                 scale,
+                kHorizonScale,
+                live1,
+                live2,
+                live3,
                 live4,
+                live5);
+
+            WLOG_INFO(
+                "wxl-modern-r4b2d: object fade starts "
+                "f1=%.9g f2=%.9g f3=%.9g f4=%.9g f5=%.9g",
+                fade1,
+                fade2,
+                fade3,
                 fade4,
-                live5,
                 fade5);
         }
     }
@@ -259,8 +298,8 @@ namespace wxl::scripts::render_modern
         if (installed)
         {
             WLOG_INFO(
-                "wxl-modern-r4b2c: extended object-distance QA hook "
-                "installed (band4 target=1800 band5 target=2112)");
+                "wxl-modern-r4b2d: proportional full-table object-distance "
+                "QA hook installed (horizon scale=2112/1250)");
         }
 
         return installed;
