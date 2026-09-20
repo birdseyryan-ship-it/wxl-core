@@ -161,7 +161,7 @@ namespace wxl::scripts::render_modern::d3d9fallback
             return mode;
         }
 
-        bool AoFullResolutionTestEnabled()
+        bool AoHalfResolutionFallbackEnabled()
         {
             static const bool enabled = []()
             {
@@ -169,7 +169,7 @@ namespace wxl::scripts::render_modern::d3d9fallback
 
                 const DWORD n =
                     GetEnvironmentVariableA(
-                        "WXL_AO_RES_TEST",
+                        "WXL_AO_HALF_RES",
                         raw,
                         sizeof(raw));
 
@@ -1319,12 +1319,12 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                 fullFmt == D3DFMT_UNKNOWN)
                 return false;
 
-            // R4B1-C diagnostic only:
-            // WXL_AO_RES_TEST=1 evaluates the exact same accepted AO
-            // algorithm at full output resolution. With the selector
-            // unset, production remains the frozen R3E4B half-res path.
+            // R4B1-D Classic Enhanced production default:
+            // raw AO now runs at full output resolution. Controlled
+            // QA/compatibility comparisons can restore the historical
+            // half-resolution path with WXL_AO_HALF_RES=1.
             const bool fullResAo =
-                AoFullResolutionTestEnabled();
+                !AoHalfResolutionFallbackEnabled();
 
             const UINT aoW =
                 fullResAo
@@ -1450,7 +1450,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             g_aoCompositeFormat = fullFmt;
 
             WLOG_INFO(
-                "wxl-modern-r4b1c: AO targets ready "
+                "wxl-modern-r4b1d: AO targets ready "
                 "raw=%ux%u composite=%ux%u fmt=%u resolution=%s",
                 g_aoWidth,
                 g_aoHeight,
