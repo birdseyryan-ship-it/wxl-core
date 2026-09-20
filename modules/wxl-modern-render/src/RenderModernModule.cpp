@@ -21,6 +21,7 @@
 #include "game/Camera.hpp"
 #include "engine/gpu/Proxy.hpp"
 #include "offsets/game/M2.hpp"
+#include "offsets/game/GroundEffect.hpp"
 #include "offsets/game/World.hpp"
 #include "offsets/game/WorldScene.hpp"
 #include "client/CWorldScene/RenderModernBridge.hpp"
@@ -47,6 +48,7 @@ namespace wxl::scripts::render_modern
     namespace ev    = wxl::events;
     namespace cam   = wxl::game::camera;
     namespace m2off = wxl::offsets::game::m2;
+    namespace geoff = wxl::offsets::game::groundeffect;
     namespace woff  = wxl::offsets::game::world;
     namespace wsoff = wxl::offsets::game::worldscene;
 
@@ -466,6 +468,111 @@ namespace wxl::scripts::render_modern
         "render-modern-r4-alpha-key-ref-qa",
         true,
         InstallAlphaKeyRefQa);
+
+    // R4C1-A: opt-in extension of the native groundEffectDist
+    // validation ceiling. Stock 3.3.5a clamps the CVar to 140 yards.
+    // This QA path raises only the permitted ceiling to 300 yards;
+    // it does NOT force the live CVar itself to 300.
+    //
+    // That lets one candidate test 140/200/250/300 live without
+    // recompilation while retaining exact stock behaviour when the
+    // environment variable is absent.
+    bool ExtendedGroundEffectDistanceEnabled()
+    {
+        static const bool enabled = []()
+        {
+            char raw[16] = {};
+
+            const DWORD n =
+                GetEnvironmentVariableA(
+                    "WXL_EXTENDED_GROUND_EFFECT_DIST",
+                    raw,
+                    sizeof(raw));
+
+            if (n == 0 || n >= sizeof(raw))
+                return false;
+
+            const char c = raw[0];
+
+            return c != '0' &&
+                   c != 'n' && c != 'N' &&
+                   c != 'f' && c != 'F';
+        }();
+
+        return enabled;
+    }
+
+    bool InstallExtendedGroundEffectDistanceQa()
+    {
+        if (!ExtendedGroundEffectDistanceEnabled())
+        {
+            WLOG_INFO(
+                "wxl-modern-r4c1a: ground-effect distance QA disabled "
+                "(stock cap=140)");
+            return true;
+        }
+
+        float* const cap =
+            reinterpret_cast<float*>(geoff::kDistCapFloat);
+
+        constexpr float kStockCap = 140.0f;
+        constexpr float kQaCap = 300.0f;
+
+        const float before = *cap;
+
+        if (before != kStockCap)
+        {
+            WLOG_ERROR(
+                "wxl-modern-r4c1a: ground-effect cap authority mismatch "
+                "expected=%.9g actual=%.9g",
+                kStockCap,
+                before);
+            return false;
+        }
+
+        DWORD oldProtect = 0;
+
+        if (!VirtualProtect(
+                cap,
+                sizeof(float),
+                PAGE_EXECUTE_READWRITE,
+                &oldProtect))
+        {
+            WLOG_ERROR(
+                "wxl-modern-r4c1a: VirtualProtect failed for "
+                "ground-effect cap");
+            return false;
+        }
+
+        *cap = kQaCap;
+
+        FlushInstructionCache(
+            GetCurrentProcess(),
+            cap,
+            sizeof(float));
+
+        DWORD restoreProtect = 0;
+
+        VirtualProtect(
+            cap,
+            sizeof(float),
+            oldProtect,
+            &restoreProtect);
+
+        WLOG_INFO(
+            "wxl-modern-r4c1a: ground-effect distance cap extended "
+            "stock=%.9g qa=%.9g live=%.9g",
+            kStockCap,
+            kQaCap,
+            *cap);
+
+        return *cap == kQaCap;
+    }
+
+    WXL_REGISTER_FEATURE(
+        "render-modern-r4-ground-effect-distance-qa",
+        true,
+        InstallExtendedGroundEffectDistanceQa);
 
     /** @brief Drives the post-process pipeline once per frame from the live device. */
     class RenderModernModule : public ev::EventScript
