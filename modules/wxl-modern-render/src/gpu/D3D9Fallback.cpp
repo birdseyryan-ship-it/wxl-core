@@ -231,15 +231,19 @@ namespace wxl::scripts::render_modern::d3d9fallback
                 if (n > 0 &&
                     n < sizeof(raw) &&
                     raw[1] == '\0' &&
-                    raw[0] >= '1' &&
+                    raw[0] >= '0' &&
                     raw[0] <= '3')
                 {
                     return static_cast<int>(
                         raw[0] - '0');
                 }
 
-                // Mode 0 is exactly the proven R3E4 bilateral behavior.
-                return 0;
+                // R3E4B Classic Enhanced production default:
+                // accepted R3E4A Mode 2.
+                //
+                // Explicit mode 0 remains available as the exact proven
+                // R3E4 bilateral baseline for controlled QA comparisons.
+                return 2;
             }();
 
             return mode;
@@ -2020,11 +2024,13 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             float radialFalloff  = 2.00f;
             float denoiseSharp   = 8.00f;
 
-            // R3E4A contact-preserving denoise sweep.
+            // R3E4B Classic Enhanced contact denoise.
             //
-            // 0 = exact R3E4
+            // Mode 2 is the accepted production default.
+            // Explicit selectors remain available for controlled QA:
+            // 0 = exact R3E4 baseline
             // 1 = mild
-            // 2 = balanced
+            // 2 = accepted balanced CE default
             // 3 = strong
             float aoRangeSharp   = 0.0f;
             float aoBleedProtect = 0.0f;
@@ -2351,7 +2357,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                 g_loggedAoProjection = true;
 
                 WLOG_INFO(
-                    "wxl-modern-r3e4: AO path production=%d preset=%d "
+                    "wxl-modern-r3e4b: AO path production=%d preset=%d "
                     "xScale=%.9g yScale=%.9g A=%.9g B=%.9g "
                     "radius=%.3g intensity=%.3g bias=%.3g "
                     "maxUv=%.3g power=%.3g radial=%.3g "
