@@ -574,6 +574,154 @@ namespace wxl::scripts::render_modern
         true,
         InstallExtendedGroundEffectDistanceQa);
 
+    // R4C2-C: opt-in extension of the native ground-effect
+    // allocation/count ceiling. The pool rebuild computes roughly
+    // groundEffectDensity * 64 but clamps the resulting count to
+    // 0x1000 (4096) at four audited immediates.
+    //
+    // This QA path raises ONLY those four native clamp immediates to
+    // 0x2000 (8192), exactly enough for density=128. The user-facing
+    // CVar is not forced; density=64 retains its normal 4096 request.
+    bool ExtendedGroundEffectPoolEnabled()
+    {
+        static const bool enabled = []()
+        {
+            char raw[16] = {};
+
+            const DWORD n =
+                GetEnvironmentVariableA(
+                    "WXL_EXTENDED_GROUND_EFFECT_POOL",
+                    raw,
+                    sizeof(raw));
+
+            if (n == 0 || n >= sizeof(raw))
+                return false;
+
+            const char c = raw[0];
+
+            return c != '0' &&
+                   c != 'n' && c != 'N' &&
+                   c != 'f' && c != 'F';
+        }();
+
+        return enabled;
+    }
+
+    bool InstallExtendedGroundEffectPoolQa()
+    {
+        constexpr uint32_t kStockClamp = 0x00001000u;
+        constexpr uint32_t kQaClamp    = 0x00002000u;
+
+        if (!ExtendedGroundEffectPoolEnabled())
+        {
+            WLOG_INFO(
+                "wxl-modern-r4c2c: ground-effect pool QA disabled "
+                "(stock clamp=%u)",
+                kStockClamp);
+            return true;
+        }
+
+        uint32_t* sites[4] =
+        {
+            reinterpret_cast<uint32_t*>(
+                geoff::kDensityClampImms[0]),
+            reinterpret_cast<uint32_t*>(
+                geoff::kDensityClampImms[1]),
+            reinterpret_cast<uint32_t*>(
+                geoff::kDensityClampImms[2]),
+            reinterpret_cast<uint32_t*>(
+                geoff::kDensityClampImms[3])
+        };
+
+        // Authority fence: absolutely nothing is written unless all
+        // four audited sites still contain the canonical 4096 value.
+        for (unsigned i = 0; i < 4; ++i)
+        {
+            if (*sites[i] != kStockClamp)
+            {
+                WLOG_ERROR(
+                    "wxl-modern-r4c2c: pool clamp authority mismatch "
+                    "site=%u address=%p expected=%u actual=%u",
+                    i,
+                    sites[i],
+                    kStockClamp,
+                    *sites[i]);
+                return false;
+            }
+        }
+
+        const uintptr_t first =
+            geoff::kDensityClampImms[0];
+
+        const uintptr_t last =
+            geoff::kDensityClampImms[3] +
+            sizeof(uint32_t);
+
+        const SIZE_T span =
+            static_cast<SIZE_T>(last - first);
+
+        DWORD oldProtect = 0;
+
+        if (!VirtualProtect(
+                reinterpret_cast<void*>(first),
+                span,
+                PAGE_EXECUTE_READWRITE,
+                &oldProtect))
+        {
+            WLOG_ERROR(
+                "wxl-modern-r4c2c: VirtualProtect failed for "
+                "ground-effect pool clamp range");
+            return false;
+        }
+
+        for (unsigned i = 0; i < 4; ++i)
+            *sites[i] = kQaClamp;
+
+        FlushInstructionCache(
+            GetCurrentProcess(),
+            reinterpret_cast<void*>(first),
+            span);
+
+        DWORD restoreProtect = 0;
+
+        const BOOL protectionRestored =
+            VirtualProtect(
+                reinterpret_cast<void*>(first),
+                span,
+                oldProtect,
+                &restoreProtect);
+
+        if (!protectionRestored)
+        {
+            WLOG_WARN(
+                "wxl-modern-r4c2c: failed to restore original "
+                "page protection after patch");
+        }
+
+        bool verified = true;
+
+        for (unsigned i = 0; i < 4; ++i)
+        {
+            if (*sites[i] != kQaClamp)
+                verified = false;
+        }
+
+        WLOG_INFO(
+            "wxl-modern-r4c2c: ground-effect pool clamp extended "
+            "stock=%u qa=%u sites=%u verified=%u",
+            kStockClamp,
+            kQaClamp,
+            4u,
+            verified ? 1u : 0u);
+
+        return verified;
+    }
+
+    WXL_REGISTER_FEATURE(
+        "render-modern-r4-ground-effect-pool-qa",
+        true,
+        InstallExtendedGroundEffectPoolQa);
+
     /** @brief Drives the post-process pipeline once per frame from the live device. */
     class RenderModernModule : public ev::EventScript
     {
