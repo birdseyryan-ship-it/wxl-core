@@ -223,6 +223,38 @@ namespace wxl::scripts::render_modern::grass
             std::string src(static_cast<const char*>(text->GetBufferPointer()));
             text->Release();
 
+            // R4C3-D: D3DDisassemble emits constant definitions as
+            //     def cN = x, y, z, w
+            // while D3DAssemble expects
+            //     def cN, x, y, z, w
+            //
+            // Normalize only "def " lines rather than globally replacing '=',
+            // preserving the captured engine shader instruction stream exactly.
+            {
+                size_t lineStart = 0;
+
+                while (lineStart < src.size())
+                {
+                    const size_t lineEnd = src.find('\n', lineStart);
+                    const size_t end =
+                        lineEnd == std::string::npos ? src.size() : lineEnd;
+
+                    if (end > lineStart + 4 &&
+                        src.compare(lineStart, 4, "def ") == 0)
+                    {
+                        const size_t equals = src.find(" = ", lineStart);
+
+                        if (equals != std::string::npos && equals < end)
+                            src.replace(equals, 3, ", ");
+                    }
+
+                    if (lineEnd == std::string::npos)
+                        break;
+
+                    lineStart = lineEnd + 1;
+                }
+            }
+
             // The live 3.3.5a D3DDisassemble output spells the same
             // view-position completion instruction with explicit masks/swizzles.
             // Accept both spellings, but do not broaden this into a fuzzy anchor:
@@ -307,8 +339,25 @@ namespace wxl::scripts::render_modern::grass
             HRESULT hr = assemble(src.c_str(), src.size(), "grassMotion", nullptr, nullptr, 0, &code, &error);
             if (FAILED(hr) || !code)
             {
-                WLOG_WARN("grass: assemble failed: %s",
-                    error ? static_cast<const char*>(error->GetBufferPointer()) : "?");
+                CreateDirectoryA("Logs", nullptr);
+
+                FILE* dump = nullptr;
+                const errno_t openResult =
+                    fopen_s(&dump, "Logs\\grass_shader_assemble_failed.asm", "wb");
+
+                if (openResult == 0 && dump)
+                {
+                    std::fwrite(src.data(), 1, src.size(), dump);
+                    std::fclose(dump);
+                }
+
+                WLOG_WARN(
+                    "grass: assemble failed: %s sourceDump=%s",
+                    error ? static_cast<const char*>(error->GetBufferPointer()) : "?",
+                    openResult == 0
+                        ? "Logs\\grass_shader_assemble_failed.asm"
+                        : "FAILED");
+
                 if (error) error->Release();
                 return false;
             }
