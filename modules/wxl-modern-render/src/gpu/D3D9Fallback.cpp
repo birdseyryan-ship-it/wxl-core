@@ -468,7 +468,21 @@ float3 viewPos(float2 uv, float d)
         z);
 }
 
-float aoTap(
+float hash12(float2 p)
+{
+    return frac(
+        sin(dot(p, float2(12.9898, 78.233))) *
+        43758.5453);
+}
+
+float2 rotate2(float2 v, float2 cs)
+{
+    return float2(
+        v.x * cs.x - v.y * cs.y,
+        v.x * cs.y + v.y * cs.x);
+}
+
+float aoSample(
     float3 P,
     float3 N,
     float2 uv,
@@ -481,7 +495,7 @@ float aoTap(
 
     float sd = tex2D(depthTex, suv).r;
 
-    // Sky / untouched clear depth is not an occluder.
+    // Untouched far/sky depth cannot occlude.
     if (sd >= 0.9995)
         return 0.0;
 
@@ -494,17 +508,68 @@ float aoTap(
         dist >= aoParams.x)
         return 0.0;
 
-    // Hemisphere test against the reconstructed surface normal.
-    // aoParams.z is a small world-space bias against self-occlusion.
+    // R3E1 discontinuity rejection.
+    //
+    // Large forward/backward jumps at silhouettes were the main source
+    // of R3E0's displaced duplicate shapes. AO is deliberately local:
+    // reject samples whose axial separation is too large relative to the
+    // chosen world-space radius.
+    float dz = abs(Q.z - P.z);
+
+    if (dz > aoParams.x * 0.55)
+        return 0.0;
+
+    // Hemisphere term relative to the reconstructed local surface normal.
     float hemi =
         saturate(
             (dot(N, V) - aoParams.z) /
             max(dist, 1.0e-4));
 
+    // Smooth radial attenuation. Squaring the falloff makes the effect
+    // strongly contact-weighted instead of producing wide halos.
     float falloff =
         saturate(1.0 - dist / aoParams.x);
 
-    return hemi * falloff;
+    falloff *= falloff;
+
+    // Additional depth-continuity confidence approaches zero as the sample
+    // nears the accepted axial-discontinuity limit.
+    float depthConfidence =
+        saturate(
+            1.0 -
+            dz / max(aoParams.x * 0.55, 1.0e-4));
+
+    return
+        hemi *
+        falloff *
+        depthConfidence;
+}
+
+float horizonPair(
+    float3 P,
+    float3 N,
+    float2 uv,
+    float2 direction,
+    float uvRadius)
+{
+    // Two radial probes share one direction. Taking the stronger horizon
+    // instead of summing both prevents one occluder from being counted
+    // repeatedly along the same screen-space ray.
+    float h0 =
+        aoSample(
+            P, N, uv,
+            direction,
+            uvRadius,
+            0.32);
+
+    float h1 =
+        aoSample(
+            P, N, uv,
+            direction,
+            uvRadius,
+            0.72);
+
+    return max(h0, h1);
 }
 
 float4 main(float2 uv : TEXCOORD0) : COLOR0
@@ -512,7 +577,6 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
     float4 scene = tex2D(sceneTex, uv);
     float d = tex2D(depthTex, uv).r;
 
-    // Preserve clear sky. In mask mode it becomes white = no AO.
     if (d >= 0.9995)
     {
         if (aoControl.x < 1.5)
@@ -523,53 +587,75 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
 
     float3 P = viewPos(uv, d);
 
-    // Reconstruct the local view-space surface normal from neighbouring
-    // pixels without requiring a normal buffer.
     float3 dPdx = ddx(P);
     float3 dPdy = ddy(P);
 
-    float3 rawN = cross(dPdx, dPdy);
-    float nLen = max(length(rawN), 1.0e-5);
-    float3 N = rawN / nLen;
+    float3 rawN =
+        cross(dPdx, dPdy);
 
-    // Keep the normal on the camera-facing hemisphere.
+    float nLen =
+        max(length(rawN), 1.0e-5);
+
+    float3 N =
+        rawN / nLen;
+
     if (dot(N, -P) < 0.0)
         N = -N;
 
-    // Project one world-space AO radius into UV space.
-    // Clamp the very-near footprint to keep the proof bounded.
+    // Convert the world-space AO radius to a screen-space footprint.
     float uvRadius =
         min(
             0.5 * aoParams.x * proj.y /
             max(P.z, 0.01),
             aoParams.w);
 
+    // Deterministic screen-space rotation.
+    //
+    // R3E0 used the exact same eight sample axes for every pixel, producing
+    // obvious translated silhouettes. R3E1 rotates the directional pattern
+    // per pixel while remaining deterministic for a given frame.
+    float2 pixel =
+        floor(uv / rcpFrame.xy);
+
+    float angle =
+        hash12(pixel) *
+        6.28318530718;
+
+    float2 cs =
+        float2(
+            cos(angle),
+            sin(angle));
+
+    // Six evenly distributed base directions. Each direction performs two
+    // radial probes via horizonPair -> twelve depth samples total.
+    float2 d0 = rotate2(float2( 1.0,       0.0),       cs);
+    float2 d1 = rotate2(float2( 0.5,       0.8660254), cs);
+    float2 d2 = rotate2(float2(-0.5,       0.8660254), cs);
+    float2 d3 = rotate2(float2(-1.0,       0.0),       cs);
+    float2 d4 = rotate2(float2(-0.5,      -0.8660254), cs);
+    float2 d5 = rotate2(float2( 0.5,      -0.8660254), cs);
+
     float occ = 0.0;
 
-    // Near cardinal ring.
-    occ += aoTap(P, N, uv, float2( 1.0,  0.0), uvRadius, 0.40);
-    occ += aoTap(P, N, uv, float2(-1.0,  0.0), uvRadius, 0.40);
-    occ += aoTap(P, N, uv, float2( 0.0,  1.0), uvRadius, 0.40);
-    occ += aoTap(P, N, uv, float2( 0.0, -1.0), uvRadius, 0.40);
+    occ += horizonPair(P, N, uv, d0, uvRadius);
+    occ += horizonPair(P, N, uv, d1, uvRadius);
+    occ += horizonPair(P, N, uv, d2, uvRadius);
+    occ += horizonPair(P, N, uv, d3, uvRadius);
+    occ += horizonPair(P, N, uv, d4, uvRadius);
+    occ += horizonPair(P, N, uv, d5, uvRadius);
 
-    // Wider diagonal ring.
-    occ += aoTap(P, N, uv, float2( 0.7071068,  0.7071068), uvRadius, 0.85);
-    occ += aoTap(P, N, uv, float2(-0.7071068,  0.7071068), uvRadius, 0.85);
-    occ += aoTap(P, N, uv, float2( 0.7071068, -0.7071068), uvRadius, 0.85);
-    occ += aoTap(P, N, uv, float2(-0.7071068, -0.7071068), uvRadius, 0.85);
-
-    occ /= 8.0;
+    occ /= 6.0;
 
     float ao =
-        saturate(1.0 - occ * aoParams.y);
+        saturate(
+            1.0 -
+            occ * aoParams.y);
 
     ao =
         pow(
             max(ao, 0.0001),
             aoControl.y);
 
-    // Near-field AO only. Full strength through fadeStart, then fade
-    // smoothly to no occlusion by fadeEnd.
     if (aoControl.w > aoControl.z)
     {
         float fade =
@@ -577,7 +663,11 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                 (P.z - aoControl.z) /
                 (aoControl.w - aoControl.z));
 
-        ao = lerp(ao, 1.0, fade);
+        ao =
+            lerp(
+                ao,
+                1.0,
+                fade);
     }
 
     if (aoControl.x < 1.5)
@@ -590,13 +680,13 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             if (!CompilePixelShader(
                     dev,
                     kAoProofPs,
-                    "R3E0 AO correctness proof",
+                    "R3E1 spatially stable AO",
                     &g_aoProofShader))
                 return false;
 
             WLOG_INFO(
-                "wxl-modern-d3d9: R3E0 AO proof shader ready "
-                "(8-tap view-space SSAO)");
+                "wxl-modern-d3d9: R3E1 AO proof shader ready "
+                "(12-tap rotated horizon SSAO)");
 
             return true;
         }
@@ -1060,7 +1150,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                 loggedMissingAoDepth = true;
 
                 WLOG_ERROR(
-                    "wxl-modern-r3e0: AO requires the captured "
+                    "wxl-modern-r3e1: AO requires the captured "
                     "world-depth surface");
             }
 
@@ -1072,7 +1162,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             g_loggedAoMode = true;
 
             WLOG_INFO(
-                "wxl-modern-r3e0: AO proof mode=%d "
+                "wxl-modern-r3e1: AO proof mode=%d "
                 "(1=mask 2=composite)",
                 aoProofMode);
         }
@@ -1562,20 +1652,21 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                 worldProjection[14]
             };
 
-            // Deliberately visible correctness-proof values.
-            // Final CE look will be tuned only after AO correctness is proven.
+            // R3E1 correctness values. These are still diagnostic rather
+            // than accepted Classic Enhanced tuning: the key change here is
+            // spatial stability / discontinuity behavior, not final strength.
             const float aoParams[4] = {
-                1.00f,   // world-space radius
-                2.20f,   // proof intensity
-                0.015f,  // self-occlusion bias
-                0.060f   // maximum UV radius for near geometry
+                0.65f,   // local world-space radius
+                1.70f,   // visible proof intensity
+                0.018f,  // self-occlusion bias
+                0.040f   // max near-camera UV footprint
             };
 
             const float aoControl[4] = {
                 static_cast<float>(aoProofMode),
-                1.25f,   // contrast/power
-                20.0f,   // full-strength distance
-                60.0f    // fully faded distance
+                1.15f,   // contrast/power
+                18.0f,   // full-strength distance
+                55.0f    // fully faded distance
             };
 
             device->SetPixelShaderConstantF(
@@ -1592,7 +1683,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                 g_loggedAoProjection = true;
 
                 WLOG_INFO(
-                    "wxl-modern-r3e0: AO projection "
+                    "wxl-modern-r3e1: AO projection "
                     "xScale=%.9g yScale=%.9g A=%.9g B=%.9g "
                     "radius=%.3g intensity=%.3g bias=%.3g "
                     "fade=%.3g..%.3g",
