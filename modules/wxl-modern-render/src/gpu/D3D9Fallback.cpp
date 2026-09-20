@@ -58,7 +58,13 @@ namespace wxl::scripts::render_modern::d3d9fallback
         IDirect3DPixelShader9* g_proofShader = nullptr;
         IDirect3DPixelShader9* g_depthProofShader = nullptr;
         IDirect3DPixelShader9* g_aoProofShader = nullptr;
+        IDirect3DPixelShader9* g_aoDenoiseShader = nullptr;
         IDirect3DPixelShader9* g_fxaaShader[3] = { nullptr, nullptr, nullptr };
+
+        // R3E2: raw AO is evaluated at half resolution, then depth-aware
+        // denoised/upsampled while compositing at full resolution.
+        IDirect3DTexture9*     g_aoTexture = nullptr;
+        IDirect3DSurface9*     g_aoSurface = nullptr;
 
         UINT      g_width = 0;
         UINT      g_height = 0;
@@ -66,6 +72,9 @@ namespace wxl::scripts::render_modern::d3d9fallback
 
         UINT      g_depthWidth = 0;
         UINT      g_depthHeight = 0;
+
+        UINT      g_aoWidth = 0;
+        UINT      g_aoHeight = 0;
 
         bool g_proofTint = false;
         int  g_lastLoggedMode = -1;
@@ -172,6 +181,9 @@ namespace wxl::scripts::render_modern::d3d9fallback
             SafeRelease(g_sceneSurface);
             SafeRelease(g_sceneTexture);
 
+            SafeRelease(g_aoSurface);
+            SafeRelease(g_aoTexture);
+
             SafeRelease(g_depthPlainSurface);
             SafeRelease(g_depthSurface);
             SafeRelease(g_depthTexture);
@@ -182,6 +194,9 @@ namespace wxl::scripts::render_modern::d3d9fallback
 
             g_depthWidth = 0;
             g_depthHeight = 0;
+
+            g_aoWidth = 0;
+            g_aoHeight = 0;
         }
 
         void ReleaseRuntime()
@@ -192,6 +207,7 @@ namespace wxl::scripts::render_modern::d3d9fallback
             SafeRelease(g_proofShader);
             SafeRelease(g_depthProofShader);
             SafeRelease(g_aoProofShader);
+            SafeRelease(g_aoDenoiseShader);
 
             for (auto*& p : g_fxaaShader)
                 SafeRelease(p);
@@ -434,16 +450,12 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             if (g_aoProofShader)
                 return true;
 
-            static const char* kAoProofPs = R"HLSL(
-sampler2D sceneTex : register(s0);
-sampler2D depthTex : register(s1);
+            static const char* kAoRawPs = R"HLSL(
+sampler2D depthTex : register(s0);
 
-float4 rcpFrame  : register(c0);
-// proj = xScale, yScale, A, B
+float4 rcpAo     : register(c0);
 float4 proj      : register(c1);
-// aoParams = worldRadius, intensity, bias, maxUvRadius
 float4 aoParams  : register(c2);
-// aoControl = mode, power, fadeStart, fadeEnd
 float4 aoControl : register(c3);
 
 float linearZ(float d)
@@ -493,51 +505,50 @@ float aoSample(
     float2 suv =
         uv + direction * uvRadius * scale;
 
-    float sd = tex2D(depthTex, suv).r;
+    float sd =
+        tex2D(depthTex, suv).r;
 
-    // Untouched far/sky depth cannot occlude.
     if (sd >= 0.9995)
         return 0.0;
 
-    float3 Q = viewPos(suv, sd);
-    float3 V = Q - P;
+    float3 Q =
+        viewPos(suv, sd);
 
-    float dist = length(V);
+    float3 V =
+        Q - P;
+
+    float dist =
+        length(V);
 
     if (dist <= 1.0e-4 ||
         dist >= aoParams.x)
         return 0.0;
 
-    // R3E1 discontinuity rejection.
-    //
-    // Large forward/backward jumps at silhouettes were the main source
-    // of R3E0's displaced duplicate shapes. AO is deliberately local:
-    // reject samples whose axial separation is too large relative to the
-    // chosen world-space radius.
-    float dz = abs(Q.z - P.z);
+    float dz =
+        abs(Q.z - P.z);
 
     if (dz > aoParams.x * 0.55)
         return 0.0;
 
-    // Hemisphere term relative to the reconstructed local surface normal.
     float hemi =
         saturate(
             (dot(N, V) - aoParams.z) /
             max(dist, 1.0e-4));
 
-    // Smooth radial attenuation. Squaring the falloff makes the effect
-    // strongly contact-weighted instead of producing wide halos.
     float falloff =
-        saturate(1.0 - dist / aoParams.x);
+        saturate(
+            1.0 -
+            dist / aoParams.x);
 
     falloff *= falloff;
 
-    // Additional depth-continuity confidence approaches zero as the sample
-    // nears the accepted axial-discontinuity limit.
     float depthConfidence =
         saturate(
             1.0 -
-            dz / max(aoParams.x * 0.55, 1.0e-4));
+            dz /
+            max(
+                aoParams.x * 0.55,
+                1.0e-4));
 
     return
         hemi *
@@ -552,9 +563,6 @@ float horizonPair(
     float2 direction,
     float uvRadius)
 {
-    // Two radial probes share one direction. Taking the stronger horizon
-    // instead of summing both prevents one occluder from being counted
-    // repeatedly along the same screen-space ray.
     float h0 =
         aoSample(
             P, N, uv,
@@ -574,48 +582,39 @@ float horizonPair(
 
 float4 main(float2 uv : TEXCOORD0) : COLOR0
 {
-    float4 scene = tex2D(sceneTex, uv);
-    float d = tex2D(depthTex, uv).r;
+    float d =
+        tex2D(depthTex, uv).r;
 
     if (d >= 0.9995)
-    {
-        if (aoControl.x < 1.5)
-            return float4(1.0, 1.0, 1.0, 1.0);
+        return float4(1,1,1,1);
 
-        return float4(scene.rgb, 1.0);
-    }
-
-    float3 P = viewPos(uv, d);
-
-    float3 dPdx = ddx(P);
-    float3 dPdy = ddy(P);
+    float3 P =
+        viewPos(uv, d);
 
     float3 rawN =
-        cross(dPdx, dPdy);
-
-    float nLen =
-        max(length(rawN), 1.0e-5);
+        cross(
+            ddx(P),
+            ddy(P));
 
     float3 N =
-        rawN / nLen;
+        rawN /
+        max(length(rawN), 1.0e-5);
 
     if (dot(N, -P) < 0.0)
         N = -N;
 
-    // Convert the world-space AO radius to a screen-space footprint.
     float uvRadius =
         min(
-            0.5 * aoParams.x * proj.y /
+            0.5 *
+            aoParams.x *
+            proj.y /
             max(P.z, 0.01),
             aoParams.w);
 
-    // Deterministic screen-space rotation.
-    //
-    // R3E0 used the exact same eight sample axes for every pixel, producing
-    // obvious translated silhouettes. R3E1 rotates the directional pattern
-    // per pixel while remaining deterministic for a given frame.
     float2 pixel =
-        floor(uv / rcpFrame.xy);
+        floor(
+            uv /
+            rcpAo.xy);
 
     float angle =
         hash12(pixel) *
@@ -626,8 +625,6 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             cos(angle),
             sin(angle));
 
-    // Six evenly distributed base directions. Each direction performs two
-    // radial probes via horizonPair -> twelve depth samples total.
     float2 d0 = rotate2(float2( 1.0,       0.0),       cs);
     float2 d1 = rotate2(float2( 0.5,       0.8660254), cs);
     float2 d2 = rotate2(float2(-0.5,       0.8660254), cs);
@@ -654,14 +651,14 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
     ao =
         pow(
             max(ao, 0.0001),
-            aoControl.y);
+            aoControl.x);
 
-    if (aoControl.w > aoControl.z)
+    if (aoControl.z > aoControl.y)
     {
         float fade =
             saturate(
-                (P.z - aoControl.z) /
-                (aoControl.w - aoControl.z));
+                (P.z - aoControl.y) /
+                (aoControl.z - aoControl.y));
 
         ao =
             lerp(
@@ -670,23 +667,146 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                 fade);
     }
 
-    if (aoControl.x < 1.5)
-        return float4(ao, ao, ao, 1.0);
-
-    return float4(scene.rgb * ao, 1.0);
+    return float4(ao, ao, ao, 1.0);
 }
 )HLSL";
 
             if (!CompilePixelShader(
                     dev,
-                    kAoProofPs,
-                    "R3E1 spatially stable AO",
+                    kAoRawPs,
+                    "R3E2 half-res raw AO",
                     &g_aoProofShader))
                 return false;
 
             WLOG_INFO(
-                "wxl-modern-d3d9: R3E1 AO proof shader ready "
-                "(12-tap rotated horizon SSAO)");
+                "wxl-modern-d3d9: R3E2 raw AO shader ready "
+                "(half-res 12-tap rotated horizon)");
+
+            return true;
+        }
+
+        bool EnsureAoDenoiseShader(IDirect3DDevice9* dev)
+        {
+            if (g_aoDenoiseShader)
+                return true;
+
+            static const char* kAoDenoisePs = R"HLSL(
+sampler2D sceneTex : register(s0);
+sampler2D aoTex    : register(s1);
+sampler2D depthTex : register(s2);
+
+float4 metrics : register(c0);
+// x=A, y=B, z=depth sharpness, w=mode
+float4 denoise : register(c1);
+
+float linearZ(float d)
+{
+    float denom = d - denoise.x;
+    float safeDenom =
+        abs(denom) > 1.0e-7 ? denom : -1.0e-7;
+
+    return max(
+        denoise.y / safeDenom,
+        0.0);
+}
+
+float2 aoTap(
+    float2 uv,
+    float2 offset,
+    float centerZ,
+    float spatialWeight)
+{
+    float2 suv =
+        uv +
+        offset * metrics.xy;
+
+    float sd =
+        tex2D(depthTex, suv).r;
+
+    if (sd >= 0.9995)
+        return float2(0.0, 0.0);
+
+    float sampleZ =
+        linearZ(sd);
+
+    float depthWeight =
+        exp(
+            -abs(sampleZ - centerZ) *
+            denoise.z);
+
+    float w =
+        spatialWeight *
+        depthWeight;
+
+    float a =
+        tex2D(aoTex, suv).r;
+
+    return float2(
+        a * w,
+        w);
+}
+
+float4 main(float2 uv : TEXCOORD0) : COLOR0
+{
+    float4 scene =
+        tex2D(sceneTex, uv);
+
+    float dc =
+        tex2D(depthTex, uv).r;
+
+    if (dc >= 0.9995)
+    {
+        if (denoise.w < 1.5)
+            return float4(1,1,1,1);
+
+        return float4(scene.rgb, 1.0);
+    }
+
+    float centerZ =
+        linearZ(dc);
+
+    float2 total =
+        float2(0.0, 0.0);
+
+    total += aoTap(uv, float2(-1,-1), centerZ, 1.0);
+    total += aoTap(uv, float2( 0,-1), centerZ, 2.0);
+    total += aoTap(uv, float2( 1,-1), centerZ, 1.0);
+
+    total += aoTap(uv, float2(-1, 0), centerZ, 2.0);
+    total += aoTap(uv, float2( 0, 0), centerZ, 4.0);
+    total += aoTap(uv, float2( 1, 0), centerZ, 2.0);
+
+    total += aoTap(uv, float2(-1, 1), centerZ, 1.0);
+    total += aoTap(uv, float2( 0, 1), centerZ, 2.0);
+    total += aoTap(uv, float2( 1, 1), centerZ, 1.0);
+
+    float ao =
+        total.y > 1.0e-5
+            ? total.x / total.y
+            : tex2D(aoTex, uv).r;
+
+    ao =
+        saturate(ao);
+
+    if (denoise.w < 1.5)
+        return float4(ao, ao, ao, 1.0);
+
+    return float4(
+        scene.rgb * ao,
+        1.0);
+}
+)HLSL";
+
+            if (!CompilePixelShader(
+                    dev,
+                    kAoDenoisePs,
+                    "R3E2 depth-aware AO denoise",
+                    &g_aoDenoiseShader))
+                return false;
+
+            WLOG_INFO(
+                "wxl-modern-d3d9: R3E2 AO denoise shader ready "
+                "(half-res -> full-res bilateral)");
 
             return true;
         }
@@ -1037,6 +1157,89 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             return true;
         }
 
+        bool EnsureAoTarget(
+            IDirect3DDevice9* dev,
+            UINT fullW,
+            UINT fullH)
+        {
+            if (!dev || !fullW || !fullH)
+                return false;
+
+            const UINT aoW =
+                fullW > 1 ? fullW / 2 : 1;
+
+            const UINT aoH =
+                fullH > 1 ? fullH / 2 : 1;
+
+            if (g_aoTexture &&
+                g_aoSurface &&
+                g_aoWidth == aoW &&
+                g_aoHeight == aoH)
+                return true;
+
+            SafeRelease(g_aoSurface);
+            SafeRelease(g_aoTexture);
+
+            g_aoWidth = 0;
+            g_aoHeight = 0;
+
+            const HRESULT createHr =
+                dev->CreateTexture(
+                    aoW,
+                    aoH,
+                    1,
+                    D3DUSAGE_RENDERTARGET,
+                    D3DFMT_A8R8G8B8,
+                    D3DPOOL_DEFAULT,
+                    &g_aoTexture,
+                    nullptr);
+
+            if (FAILED(createHr) ||
+                !g_aoTexture)
+            {
+                WLOG_ERROR(
+                    "wxl-modern-r3e2: half-res AO texture "
+                    "creation failed %ux%u hr=0x%08X",
+                    aoW,
+                    aoH,
+                    static_cast<unsigned>(createHr));
+
+                SafeRelease(g_aoTexture);
+                return false;
+            }
+
+            const HRESULT surfaceHr =
+                g_aoTexture->GetSurfaceLevel(
+                    0,
+                    &g_aoSurface);
+
+            if (FAILED(surfaceHr) ||
+                !g_aoSurface)
+            {
+                WLOG_ERROR(
+                    "wxl-modern-r3e2: half-res AO surface "
+                    "acquisition failed hr=0x%08X",
+                    static_cast<unsigned>(surfaceHr));
+
+                SafeRelease(g_aoSurface);
+                SafeRelease(g_aoTexture);
+                return false;
+            }
+
+            g_aoWidth = aoW;
+            g_aoHeight = aoH;
+
+            WLOG_INFO(
+                "wxl-modern-r3e2: half-res AO target ready "
+                "%ux%u from %ux%u",
+                g_aoWidth,
+                g_aoHeight,
+                fullW,
+                fullH);
+
+            return true;
+        }
+
         void RestoreDeviceState(IDirect3DDevice9* dev,
                                 IDirect3DStateBlock9* state,
                                 IDirect3DSurface9* oldRt,
@@ -1212,7 +1415,8 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
         }
         else if (aoProof)
         {
-            if (!EnsureAoProofShader(device))
+            if (!EnsureAoProofShader(device) ||
+                !EnsureAoDenoiseShader(device))
                 return false;
 
             shader = g_aoProofShader;
@@ -1239,6 +1443,16 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
 
         D3DSURFACE_DESC bbDesc = {};
         if (!EnsureTarget(device, backbuffer, bbDesc))
+        {
+            backbuffer->Release();
+            return false;
+        }
+
+        if (aoProof &&
+            !EnsureAoTarget(
+                device,
+                bbDesc.Width,
+                bbDesc.Height))
         {
             backbuffer->Release();
             return false;
@@ -1505,6 +1719,8 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                 mode == 11 ? "depth-raw-thresholds" :
                 mode == 12 ? "ao-proof-mask" :
                 mode == 13 ? "ao-proof-composite" :
+                mode == 14 ? "ao-denoised-mask" :
+                mode == 15 ? "ao-denoised-composite" :
                              "FXAA";
 
             WLOG_INFO(
@@ -1519,6 +1735,319 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             g_lastLoggedMode = mode;
             g_lastLoggedTier = tier;
         };
+
+        // ------------------------------------------------------------
+        // R3E2 AO:
+        // pass 1 = half-resolution raw AO
+        // pass 2 = full-resolution bilateral denoise/upsample
+        // ------------------------------------------------------------
+
+        if (aoProof)
+        {
+            const float projection[4] = {
+                worldProjection[0],
+                worldProjection[5],
+                worldProjection[10],
+                worldProjection[14]
+            };
+
+            const float aoParams[4] = {
+                0.65f,
+                1.70f,
+                0.018f,
+                0.040f
+            };
+
+            const float rawControl[4] = {
+                1.15f,
+                18.0f,
+                55.0f,
+                0.0f
+            };
+
+            device->SetDepthStencilSurface(nullptr);
+            device->SetVertexShader(nullptr);
+            device->SetFVF(kFsFvf);
+
+            device->SetRenderState(D3DRS_ZENABLE, FALSE);
+            device->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
+            device->SetRenderState(D3DRS_STENCILENABLE, FALSE);
+            device->SetRenderState(D3DRS_ALPHATESTENABLE, FALSE);
+            device->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
+            device->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
+            device->SetRenderState(D3DRS_FOGENABLE, FALSE);
+            device->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE);
+
+            device->SetRenderState(
+                D3DRS_COLORWRITEENABLE,
+                D3DCOLORWRITEENABLE_RED |
+                D3DCOLORWRITEENABLE_GREEN |
+                D3DCOLORWRITEENABLE_BLUE |
+                D3DCOLORWRITEENABLE_ALPHA);
+
+            // Pass 1
+            D3DVIEWPORT9 aoVp = {};
+            aoVp.X = 0;
+            aoVp.Y = 0;
+            aoVp.Width = g_aoWidth;
+            aoVp.Height = g_aoHeight;
+            aoVp.MinZ = 0.0f;
+            aoVp.MaxZ = 1.0f;
+
+            device->SetRenderTarget(
+                0,
+                g_aoSurface);
+
+            device->SetViewport(
+                &aoVp);
+
+            device->SetPixelShader(
+                g_aoProofShader);
+
+            device->SetTexture(
+                0,
+                static_cast<IDirect3DBaseTexture9*>(
+                    g_depthTexture));
+
+            device->SetSamplerState(
+                0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+            device->SetSamplerState(
+                0, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+            device->SetSamplerState(
+                0, D3DSAMP_MINFILTER, D3DTEXF_POINT);
+            device->SetSamplerState(
+                0, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+            device->SetSamplerState(
+                0, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
+            device->SetSamplerState(
+                0, D3DSAMP_SRGBTEXTURE, FALSE);
+
+            const float rcpAo[4] = {
+                1.0f / static_cast<float>(g_aoWidth),
+                1.0f / static_cast<float>(g_aoHeight),
+                0.0f,
+                0.0f
+            };
+
+            device->SetPixelShaderConstantF(
+                0, rcpAo, 1);
+
+            device->SetPixelShaderConstantF(
+                1, projection, 1);
+
+            device->SetPixelShaderConstantF(
+                2, aoParams, 1);
+
+            device->SetPixelShaderConstantF(
+                3, rawControl, 1);
+
+            const float aoW =
+                static_cast<float>(g_aoWidth);
+
+            const float aoH =
+                static_cast<float>(g_aoHeight);
+
+            const FsVertex aoQuad[4] = {
+                { -0.5f,      -0.5f,      0.0f, 1.0f, 0.0f, 0.0f },
+                { aoW - 0.5f, -0.5f,      0.0f, 1.0f, 1.0f, 0.0f },
+                { -0.5f,       aoH - 0.5f,0.0f, 1.0f, 0.0f, 1.0f },
+                { aoW - 0.5f,  aoH - 0.5f,0.0f, 1.0f, 1.0f, 1.0f },
+            };
+
+            const HRESULT aoDrawHr =
+                device->DrawPrimitiveUP(
+                    D3DPT_TRIANGLESTRIP,
+                    2,
+                    aoQuad,
+                    sizeof(FsVertex));
+
+            device->SetTexture(0, nullptr);
+
+            if (FAILED(aoDrawHr))
+            {
+                WLOG_ERROR(
+                    "wxl-modern-r3e2: half-res AO draw failed "
+                    "hr=0x%08X",
+                    static_cast<unsigned>(aoDrawHr));
+
+                RestoreDeviceState(
+                    device, state, oldRt, oldDepth, oldViewport);
+
+                SafeRelease(state);
+                SafeRelease(oldRt);
+                SafeRelease(oldDepth);
+                backbuffer->Release();
+                return false;
+            }
+
+            // Pass 2
+            D3DVIEWPORT9 fullVp = {};
+            fullVp.X = 0;
+            fullVp.Y = 0;
+            fullVp.Width = bbDesc.Width;
+            fullVp.Height = bbDesc.Height;
+            fullVp.MinZ = 0.0f;
+            fullVp.MaxZ = 1.0f;
+
+            device->SetRenderTarget(
+                0,
+                backbuffer);
+
+            device->SetViewport(
+                &fullVp);
+
+            device->SetPixelShader(
+                g_aoDenoiseShader);
+
+            device->SetTexture(
+                0,
+                static_cast<IDirect3DBaseTexture9*>(
+                    g_sceneTexture));
+
+            device->SetTexture(
+                1,
+                static_cast<IDirect3DBaseTexture9*>(
+                    g_aoTexture));
+
+            device->SetTexture(
+                2,
+                static_cast<IDirect3DBaseTexture9*>(
+                    g_depthTexture));
+
+            device->SetSamplerState(
+                0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+            device->SetSamplerState(
+                0, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+            device->SetSamplerState(
+                0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
+            device->SetSamplerState(
+                0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
+            device->SetSamplerState(
+                0, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
+            device->SetSamplerState(
+                0, D3DSAMP_SRGBTEXTURE, FALSE);
+
+            device->SetSamplerState(
+                1, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+            device->SetSamplerState(
+                1, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+            device->SetSamplerState(
+                1, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
+            device->SetSamplerState(
+                1, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
+            device->SetSamplerState(
+                1, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
+            device->SetSamplerState(
+                1, D3DSAMP_SRGBTEXTURE, FALSE);
+
+            device->SetSamplerState(
+                2, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+            device->SetSamplerState(
+                2, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+            device->SetSamplerState(
+                2, D3DSAMP_MINFILTER, D3DTEXF_POINT);
+            device->SetSamplerState(
+                2, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+            device->SetSamplerState(
+                2, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
+            device->SetSamplerState(
+                2, D3DSAMP_SRGBTEXTURE, FALSE);
+
+            const float metrics[4] = {
+                1.0f / static_cast<float>(g_aoWidth),
+                1.0f / static_cast<float>(g_aoHeight),
+                1.0f / static_cast<float>(bbDesc.Width),
+                1.0f / static_cast<float>(bbDesc.Height)
+            };
+
+            const float denoiseParams[4] = {
+                projection[2],
+                projection[3],
+                8.0f,
+                static_cast<float>(aoProofMode)
+            };
+
+            device->SetPixelShaderConstantF(
+                0, metrics, 1);
+
+            device->SetPixelShaderConstantF(
+                1, denoiseParams, 1);
+
+            const float w =
+                static_cast<float>(bbDesc.Width);
+
+            const float h =
+                static_cast<float>(bbDesc.Height);
+
+            const FsVertex fullQuad[4] = {
+                { -0.5f,    -0.5f,    0.0f, 1.0f, 0.0f, 0.0f },
+                { w - 0.5f, -0.5f,    0.0f, 1.0f, 1.0f, 0.0f },
+                { -0.5f,     h - 0.5f,0.0f, 1.0f, 0.0f, 1.0f },
+                { w - 0.5f,  h - 0.5f,0.0f, 1.0f, 1.0f, 1.0f },
+            };
+
+            const HRESULT denoiseDrawHr =
+                device->DrawPrimitiveUP(
+                    D3DPT_TRIANGLESTRIP,
+                    2,
+                    fullQuad,
+                    sizeof(FsVertex));
+
+            device->SetTexture(0, nullptr);
+            device->SetTexture(1, nullptr);
+            device->SetTexture(2, nullptr);
+
+            if (!g_loggedAoProjection)
+            {
+                g_loggedAoProjection = true;
+
+                WLOG_INFO(
+                    "wxl-modern-r3e2: AO projection "
+                    "xScale=%.9g yScale=%.9g A=%.9g B=%.9g "
+                    "radius=%.3g intensity=%.3g bias=%.3g "
+                    "fade=%.3g..%.3g ao=%ux%u denoiseSharp=%.3g",
+                    projection[0],
+                    projection[1],
+                    projection[2],
+                    projection[3],
+                    aoParams[0],
+                    aoParams[1],
+                    aoParams[2],
+                    rawControl[1],
+                    rawControl[2],
+                    g_aoWidth,
+                    g_aoHeight,
+                    denoiseParams[2]);
+            }
+
+            RestoreDeviceState(
+                device, state, oldRt, oldDepth, oldViewport);
+
+            if (FAILED(denoiseDrawHr))
+            {
+                WLOG_ERROR(
+                    "wxl-modern-r3e2: AO denoise/composite draw "
+                    "failed hr=0x%08X",
+                    static_cast<unsigned>(denoiseDrawHr));
+
+                SafeRelease(state);
+                SafeRelease(oldRt);
+                SafeRelease(oldDepth);
+                backbuffer->Release();
+                return false;
+            }
+
+            logPass(
+                aoProofMode == 1 ? 14 : 15,
+                aoProofMode);
+
+            SafeRelease(state);
+            SafeRelease(oldRt);
+            SafeRelease(oldDepth);
+            backbuffer->Release();
+
+            return true;
+        }
 
         // ------------------------------------------------------------
         // SMAA: three-pass native D3D9 implementation.
