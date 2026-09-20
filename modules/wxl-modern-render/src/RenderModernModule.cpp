@@ -16,8 +16,11 @@
 
 #include "common/Log.hpp"
 #include "engine/events/EventScript.hpp"
+#include "engine/hook/Hook.hpp"
+#include "engine/hook/Registry.hpp"
 #include "game/Camera.hpp"
 #include "engine/gpu/Proxy.hpp"
+#include "offsets/game/World.hpp"
 #include "client/CWorldScene/RenderModernBridge.hpp"
 
 #include "gpu/Pipeline.hpp"
@@ -27,6 +30,7 @@
 #include <d3d9.h>
 #include <d3d9on12.h>
 
+#include <cstdint>
 #include <cstring>
 
 // The live-engine half of the graphics module. The proxy (d3d9.dll) owns the shared D3D12 device + queue and
@@ -37,8 +41,107 @@
 // onto the native backbuffer, and the UI then draws crisp on top.
 namespace wxl::scripts::render_modern
 {
-    namespace ev  = wxl::events;
-    namespace cam = wxl::game::camera;
+    namespace ev   = wxl::events;
+    namespace cam  = wxl::game::camera;
+    namespace woff = wxl::offsets::game::world;
+
+    // R4B2-A: controlled QA extension of the native world far-clip validator.
+    //
+    // Stock 3.3.5a remains authoritative unless WXL_EXTENDED_FARCLIP is
+    // explicitly enabled. Requests at or below the native 1583.3334-yard
+    // ceiling still use the engine validator unchanged. Only requests above
+    // that ceiling are extended, and only as far as the 2112-yard QA target.
+    woff::World_ValidateFarClipFn g_origValidateFarClip = nullptr;
+
+    bool ExtendedFarClipEnabled()
+    {
+        static const bool enabled = []()
+        {
+            char raw[16] = {};
+
+            const DWORD n =
+                GetEnvironmentVariableA(
+                    "WXL_EXTENDED_FARCLIP",
+                    raw,
+                    sizeof(raw));
+
+            if (n == 0 || n >= sizeof(raw))
+                return false;
+
+            const char c = raw[0];
+
+            return c != '0' &&
+                   c != 'n' && c != 'N' &&
+                   c != 'f' && c != 'F';
+        }();
+
+        return enabled;
+    }
+
+    float __cdecl hkValidateFarClip(float requested, int32_t mapId)
+    {
+        const float stock =
+            g_origValidateFarClip
+                ? g_origValidateFarClip(requested, mapId)
+                : requested;
+
+        if (!ExtendedFarClipEnabled())
+            return stock;
+
+        constexpr float kNativeCeiling = 1583.3334f;
+        constexpr float kQaCeiling = 2112.0f;
+
+        float result = stock;
+
+        if (requested > kNativeCeiling)
+            result =
+                requested < kQaCeiling
+                    ? requested
+                    : kQaCeiling;
+
+        static unsigned logged = 0;
+
+        if (logged < 8)
+        {
+            ++logged;
+
+            WLOG_INFO(
+                "wxl-modern-r4b2a: farclip validator "
+                "requested=%.9g map=%d stock=%.9g result=%.9g "
+                "extended=%u",
+                requested,
+                static_cast<int>(mapId),
+                stock,
+                result,
+                ExtendedFarClipEnabled() ? 1u : 0u);
+        }
+
+        return result;
+    }
+
+    bool InstallExtendedFarClipQa()
+    {
+        const bool installed =
+            wxl::hook::Install(
+                "R4ExtendedFarClipValidator",
+                woff::kValidateFarClip,
+                &hkValidateFarClip,
+                &g_origValidateFarClip);
+
+        if (installed)
+        {
+            WLOG_INFO(
+                "wxl-modern-r4b2a: extended farclip QA hook installed "
+                "(native=1583.3334 qa=2112)");
+        }
+
+        return installed;
+    }
+
+    WXL_REGISTER_FEATURE(
+        "render-modern-r4-extended-farclip",
+        true,
+        InstallExtendedFarClipQa);
 
     /** @brief Drives the post-process pipeline once per frame from the live device. */
     class RenderModernModule : public ev::EventScript
