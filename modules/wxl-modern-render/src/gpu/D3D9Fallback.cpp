@@ -176,6 +176,35 @@ namespace wxl::scripts::render_modern::d3d9fallback
             return mode;
         }
 
+        int AoTuneMode()
+        {
+            static const int mode = []()
+            {
+                char raw[16] = {};
+
+                const DWORD n =
+                    GetEnvironmentVariableA(
+                        "WXL_AO_TUNE",
+                        raw,
+                        sizeof(raw));
+
+                if (n > 0 &&
+                    n < sizeof(raw) &&
+                    raw[1] == '\0' &&
+                    raw[0] >= '1' &&
+                    raw[0] <= '3')
+                {
+                    return static_cast<int>(
+                        raw[0] - '0');
+                }
+
+                // 0 is the exact R3E2 visual baseline.
+                return 0;
+            }();
+
+            return mode;
+        }
+
         void ReleaseTarget()
         {
             SafeRelease(g_sceneSurface);
@@ -540,7 +569,13 @@ float aoSample(
             1.0 -
             dist / aoParams.x);
 
-    falloff *= falloff;
+    // R3E3: explicit radial shaping. 2.0 exactly reproduces the
+    // R3E2 squared falloff; higher values progressively tighten AO
+    // around true contact regions without changing the sampling topology.
+    falloff =
+        pow(
+            max(falloff, 0.0001),
+            max(aoControl.w, 1.0));
 
     float depthConfidence =
         saturate(
@@ -1324,6 +1359,9 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
         const int aoProofMode =
             aoProof ? requestedAoProofMode : 0;
 
+        const int aoTuneMode =
+            AoTuneMode();
+
         const bool needReadableDepth =
             depthProof || aoProof;
 
@@ -1751,18 +1789,68 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                 worldProjection[14]
             };
 
+            // R3E3 controlled contact-shaping sweep.
+            //
+            // Preset 0 exactly reproduces R3E2.
+            // The other presets progressively reduce the world-space
+            // footprint and steepen radial attenuation. This targets the
+            // broad "blob" visible around character feet without hiding
+            // the problem by simply lowering global intensity.
+            float aoRadius       = 0.65f;
+            float aoIntensity    = 1.70f;
+            float aoBias         = 0.018f;
+            float aoMaxUvRadius  = 0.040f;
+            float aoPower        = 1.15f;
+            float radialFalloff  = 2.00f;
+            float denoiseSharp   = 8.00f;
+
+            if (aoTuneMode == 1)
+            {
+                // Balanced: preserve architectural depth but tighten
+                // character/object contact lobes.
+                aoRadius       = 0.52f;
+                aoIntensity    = 1.62f;
+                aoBias         = 0.020f;
+                aoMaxUvRadius  = 0.032f;
+                aoPower        = 1.12f;
+                radialFalloff  = 2.50f;
+                denoiseSharp   = 10.0f;
+            }
+            else if (aoTuneMode == 2)
+            {
+                // Contact focused: likely CE target territory.
+                aoRadius       = 0.42f;
+                aoIntensity    = 1.58f;
+                aoBias         = 0.022f;
+                aoMaxUvRadius  = 0.026f;
+                aoPower        = 1.10f;
+                radialFalloff  = 3.00f;
+                denoiseSharp   = 10.0f;
+            }
+            else if (aoTuneMode == 3)
+            {
+                // Tight/subtle: useful lower-bound comparison.
+                aoRadius       = 0.34f;
+                aoIntensity    = 1.48f;
+                aoBias         = 0.024f;
+                aoMaxUvRadius  = 0.021f;
+                aoPower        = 1.08f;
+                radialFalloff  = 3.40f;
+                denoiseSharp   = 12.0f;
+            }
+
             const float aoParams[4] = {
-                0.65f,
-                1.70f,
-                0.018f,
-                0.040f
+                aoRadius,
+                aoIntensity,
+                aoBias,
+                aoMaxUvRadius
             };
 
             const float rawControl[4] = {
-                1.15f,
+                aoPower,
                 18.0f,
                 55.0f,
-                0.0f
+                radialFalloff
             };
 
             device->SetDepthStencilSurface(nullptr);
@@ -1963,7 +2051,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             const float denoiseParams[4] = {
                 projection[2],
                 projection[3],
-                8.0f,
+                denoiseSharp,
                 static_cast<float>(aoProofMode)
             };
 
@@ -2002,10 +2090,12 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                 g_loggedAoProjection = true;
 
                 WLOG_INFO(
-                    "wxl-modern-r3e2: AO projection "
+                    "wxl-modern-r3e3: AO tuning preset=%d "
                     "xScale=%.9g yScale=%.9g A=%.9g B=%.9g "
                     "radius=%.3g intensity=%.3g bias=%.3g "
+                    "maxUv=%.3g power=%.3g radial=%.3g "
                     "fade=%.3g..%.3g ao=%ux%u denoiseSharp=%.3g",
+                    aoTuneMode,
                     projection[0],
                     projection[1],
                     projection[2],
@@ -2013,6 +2103,9 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                     aoParams[0],
                     aoParams[1],
                     aoParams[2],
+                    aoParams[3],
+                    rawControl[0],
+                    rawControl[3],
                     rawControl[1],
                     rawControl[2],
                     g_aoWidth,
