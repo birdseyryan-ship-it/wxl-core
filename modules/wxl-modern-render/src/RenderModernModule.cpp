@@ -20,6 +20,7 @@
 #include "engine/hook/Registry.hpp"
 #include "game/Camera.hpp"
 #include "engine/gpu/Proxy.hpp"
+#include "offsets/game/M2.hpp"
 #include "offsets/game/World.hpp"
 #include "offsets/game/WorldScene.hpp"
 #include "client/CWorldScene/RenderModernBridge.hpp"
@@ -32,6 +33,7 @@
 #include <d3d9on12.h>
 
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 
 // The live-engine half of the graphics module. The proxy (d3d9.dll) owns the shared D3D12 device + queue and
@@ -44,6 +46,7 @@ namespace wxl::scripts::render_modern
 {
     namespace ev    = wxl::events;
     namespace cam   = wxl::game::camera;
+    namespace m2off = wxl::offsets::game::m2;
     namespace woff  = wxl::offsets::game::world;
     namespace wsoff = wxl::offsets::game::worldscene;
 
@@ -309,6 +312,160 @@ namespace wxl::scripts::render_modern
         "render-modern-r4-extended-object-distance",
         true,
         InstallExtendedObjectDistanceQa);
+
+    // R4B2-F2: opt-in QA override for the native M2 alpha-key
+    // reference. Stock 3.3.5a uses 224/255 for blend mode 1. At long
+    // distance, mip-filtered foliage alpha can lose coverage against
+    // that high cutoff even while the M2 itself remains drawable.
+    //
+    // WXL_ALPHA_KEY_REF_BYTE accepts 0..224. Unset = exact stock
+    // behaviour. The hook lets the native material setup run first,
+    // then overrides ONLY blend-mode-1 alpha reference state.
+    m2off::M2_SetupMaterialFn g_origSetupMaterialAlphaQa = nullptr;
+
+    struct AlphaKeyRefQaConfig
+    {
+        bool enabled = false;
+        unsigned byteRef = 224;
+        float normalizedRef = 224.0f / 255.0f;
+    };
+
+    const AlphaKeyRefQaConfig& GetAlphaKeyRefQaConfig()
+    {
+        static const AlphaKeyRefQaConfig config = []()
+        {
+            AlphaKeyRefQaConfig c;
+
+            char raw[32] = {};
+
+            const DWORD n =
+                GetEnvironmentVariableA(
+                    "WXL_ALPHA_KEY_REF_BYTE",
+                    raw,
+                    sizeof(raw));
+
+            if (n == 0 || n >= sizeof(raw))
+                return c;
+
+            char* end = nullptr;
+            const long parsed = std::strtol(raw, &end, 10);
+
+            if (end == raw || (end && *end != '\\0'))
+                return c;
+
+            long clamped = parsed;
+
+            if (clamped < 0)
+                clamped = 0;
+
+            if (clamped > 224)
+                clamped = 224;
+
+            c.enabled = true;
+            c.byteRef = static_cast<unsigned>(clamped);
+            c.normalizedRef =
+                static_cast<float>(clamped) / 255.0f;
+
+            return c;
+        }();
+
+        return config;
+    }
+
+    void __fastcall hkSetupMaterialAlphaQa(
+        void* renderCtx,
+        void* edx)
+    {
+        if (g_origSetupMaterialAlphaQa)
+            g_origSetupMaterialAlphaQa(renderCtx, edx);
+
+        const AlphaKeyRefQaConfig& qa =
+            GetAlphaKeyRefQaConfig();
+
+        if (!qa.enabled || !renderCtx)
+            return;
+
+        const auto* ctx =
+            static_cast<const m2off::DrawContext*>(renderCtx);
+
+        if (!ctx->material || !ctx->element)
+            return;
+
+        const auto* material =
+            static_cast<const m2off::Material*>(ctx->material);
+
+        if (material->blend != 1)
+            return;
+
+        const auto* elementBytes =
+            static_cast<const uint8_t*>(ctx->element);
+
+        const float elementAlpha =
+            *reinterpret_cast<const float*>(
+                elementBytes + m2off::kOffElementAlpha);
+
+        float alphaRef =
+            elementAlpha * qa.normalizedRef;
+
+        if (alphaRef < 0.0f)
+            alphaRef = 0.0f;
+        else if (alphaRef > 1.0f)
+            alphaRef = 1.0f;
+
+        using PushAlphaRefFn =
+            void(__cdecl*)(float alphaRef);
+
+        const auto pushAlphaRef =
+            reinterpret_cast<PushAlphaRefFn>(
+                m2off::kPushAlphaRef);
+
+        pushAlphaRef(alphaRef);
+
+        static unsigned logged = 0;
+
+        if (logged < 8)
+        {
+            ++logged;
+
+            WLOG_INFO(
+                "wxl-modern-r4b2f2: alpha-key ref QA "
+                "byte=%u normalized=%.9g elementAlpha=%.9g "
+                "appliedRef=%.9g",
+                qa.byteRef,
+                qa.normalizedRef,
+                elementAlpha,
+                alphaRef);
+        }
+    }
+
+    bool InstallAlphaKeyRefQa()
+    {
+        const bool installed =
+            wxl::hook::Install(
+                "R4AlphaKeyRefQa",
+                m2off::kSetupMaterial,
+                &hkSetupMaterialAlphaQa,
+                &g_origSetupMaterialAlphaQa);
+
+        if (installed)
+        {
+            const AlphaKeyRefQaConfig& qa =
+                GetAlphaKeyRefQaConfig();
+
+            WLOG_INFO(
+                "wxl-modern-r4b2f2: alpha-key reference QA hook installed "
+                "(stock=224 configured=%u enabled=%u)",
+                qa.byteRef,
+                qa.enabled ? 1u : 0u);
+        }
+
+        return installed;
+    }
+
+    WXL_REGISTER_FEATURE(
+        "render-modern-r4-alpha-key-ref-qa",
+        true,
+        InstallAlphaKeyRefQa);
 
     /** @brief Drives the post-process pipeline once per frame from the live device. */
     class RenderModernModule : public ev::EventScript
