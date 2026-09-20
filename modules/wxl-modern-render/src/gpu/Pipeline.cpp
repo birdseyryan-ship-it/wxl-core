@@ -36,14 +36,37 @@ namespace wxl::scripts::render_modern
     // The chain, in render order. Ambient occlusion runs first so its darkening is itself anti-aliased by a
     // later pass; the anti-aliasing methods run last. They are mutually exclusive (the overlay keeps one
     // enabled at a time), but SSAO is orthogonal and stacks with whichever AA, with or without supersampling.
-    // Every effect ships disabled: an empty run is a 1:1 passthrough.
+    //
+    // R3E0A Classic Enhanced baseline:
+    //   - native engine MSAA remains owned by WoW
+    //   - SMAA starts enabled at High
+    //   - FXAA/CMAA2/AO remain disabled until explicitly selected
+    //
+    // Proton diagnostic modes still take precedence inside D3D9Fallback, so a depth/AO proof bypasses
+    // SMAA for that diagnostic frame without changing this persistent startup baseline.
     Pipeline::Pipeline()
     {
-        auto add = [this](std::unique_ptr<IEffect> e) { e->SetEnabled(false); m_effects.emplace_back(std::move(e)); };
-        add(std::make_unique<AoEffect>());      // SSAO (depth-using); stacks with any AA and with supersampling
-        add(std::make_unique<FxaaEffect>());    // default AA
-        add(std::make_unique<SmaaEffect>());
-        add(std::make_unique<Cmaa2Effect>());
+        auto add = [this](
+            std::unique_ptr<IEffect> e,
+            bool enabled,
+            Quality quality)
+        {
+            e->SetQuality(quality);
+            e->SetEnabled(enabled);
+            m_effects.emplace_back(std::move(e));
+        };
+
+        add(std::make_unique<AoEffect>(),
+            false, Quality::Medium);
+
+        add(std::make_unique<FxaaEffect>(),
+            false, Quality::Medium);
+
+        add(std::make_unique<SmaaEffect>(),
+            true, Quality::High);
+
+        add(std::make_unique<Cmaa2Effect>(),
+            false, Quality::Medium);
     }
 
     // Resolve pass: sample the final scene and write it to the backbuffer. With a render-size scene and the
