@@ -795,6 +795,34 @@ namespace wxl::offsets::game::adt
     /// hook for a custom terrain shadowing scheme. __cdecl, caller-cleaned.
     constexpr uintptr_t kBindTerrainShadowMap              = 0x00874660;
 
+    // --- projected dynamic-shadow cascade pipeline -----------------------------------------
+    // R5 Classic-shadow backport authority:
+    //
+    // 0x874890 builds/updates the stock three-cascade shadow object.
+    // 0x874FB0 subsequently walks native cascade indices 0..active and invokes
+    // the registered per-cascade render callback (0x7BBC50 via 0x00D43164).
+    //
+    // IMPORTANT: the native object contains exactly three packed 0xF4 records.
+    // A fourth native record would overlap the next live array. Classic cascade
+    // #4 therefore belongs to extension-owned sidecar storage and must never be
+    // represented by passing native cascade index 3 into the stock callback.
+    constexpr uintptr_t kBuildShadowCascades               = 0x00874890;
+    constexpr uintptr_t kRenderShadowCascades              = 0x00874FB0;
+    constexpr uintptr_t kShadowCascadeRenderCallback       = 0x007BBC50;
+
+    // Runtime-populated .data/BSS globals.
+    constexpr uintptr_t kShadowRenderCallbackPtr            = 0x00D43164;
+    constexpr uintptr_t kShadowMapDimension                 = 0x00D43150;
+    constexpr uintptr_t kEffectiveShadowQuality             = 0x00D43154;
+
+    // Native shadow-object layout proven by R5A13.
+    constexpr size_t kShadowCascadeRecordBase               = 0x06C;
+    constexpr size_t kShadowCascadeRecordStride             = 0x0F4;
+    constexpr size_t kShadowActiveCascadeIndex              = 0x0A84;
+    constexpr size_t kShadowStateField                      = 0x0A88;
+
+    using RenderShadowCascadesFn = void(__cdecl*)(void* shadowObject);
+
     // Texture layers, alpha maps and terrain shadow maps (render-chunk side)
     /// Teardown counterpart of the layer build -- release any extension-side per-layer resource exactly
     /// when the client does. __thiscall, caller-cleaned.
