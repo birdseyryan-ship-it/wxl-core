@@ -123,6 +123,32 @@ namespace wxl::scripts::render_modern::shadows
             return enabled;
         }
 
+        bool ClassicShadowJoinedProofEnabled()
+        {
+            static const bool enabled = []()
+            {
+                char raw[16] = {};
+
+                const DWORD count =
+                    GetEnvironmentVariableA(
+                        "WXL_CLASSIC_SHADOW_JOINED_PROOF",
+                        raw,
+                        sizeof(raw));
+
+                if (count == 0 || count >= sizeof(raw))
+                    return false;
+
+                const char c = raw[0];
+
+                return
+                    c != '0' &&
+                    c != 'n' && c != 'N' &&
+                    c != 'f' && c != 'F';
+            }();
+
+            return enabled;
+        }
+
         void LogNativeShadowResources()
         {
             static bool logged = false;
@@ -859,6 +885,387 @@ namespace wxl::scripts::render_modern::shadows
                 nonZero ? 1u : 0u,
                 static_cast<int>(activeIndex),
                 static_cast<int>(state));
+
+            if (!ClassicShadowJoinedProofEnabled())
+                return;
+
+            if (
+                !g_classicCascade4.resource ||
+                !g_classicCascade4.gxObject)
+            {
+                WLOG_WARN(
+                    "wxl-modern-r5b2f3: joined proof refused "
+                    "fourth sidecar unavailable "
+                    "resource=%p gx=%p",
+                    g_classicCascade4.resource,
+                    g_classicCascade4.gxObject);
+
+                return;
+            }
+
+            const auto postBuild =
+                reinterpret_cast<
+                    adt::ShadowSyntheticPostBuildFn>(
+                    adt::kShadowSyntheticPostBuildHelper);
+
+            const auto finalizer =
+                reinterpret_cast<
+                    adt::ShadowFinalizerFn>(
+                    *reinterpret_cast<void* const*>(
+                        adt::kShadowFinalizerCallbackPtr));
+
+            if (
+                !postBuild ||
+                !finalizer ||
+                reinterpret_cast<uintptr_t>(finalizer) !=
+                    adt::kShadowFinalizerCallback)
+            {
+                WLOG_WARN(
+                    "wxl-modern-r5b2f3: finalizer proof refused "
+                    "postBuild=%p finalizer=%p "
+                    "expectedFinalizer=0x%08X",
+                    reinterpret_cast<void*>(postBuild),
+                    reinterpret_cast<void*>(finalizer),
+                    static_cast<unsigned>(
+                        adt::kShadowFinalizerCallback));
+
+                return;
+            }
+
+            // Exact stock 0x876126 call:
+            //   push syntheticObject+0x24
+            //   ECX = syntheticObject+0x6C
+            //   call 0x983990
+            postBuild(
+                cascadeRecord,
+                nullptr,
+                synthetic +
+                    adt::kShadowSyntheticPostBuildArgument);
+
+            // Preserve live global context because F2 is an isolated proof,
+            // not yet the production fourth-cascade path.
+            float savedVector[3] =
+            {
+                *reinterpret_cast<const float*>(
+                    adt::kShadowSyntheticCasterVector + 0),
+                *reinterpret_cast<const float*>(
+                    adt::kShadowSyntheticCasterVector + 4),
+                *reinterpret_cast<const float*>(
+                    adt::kShadowSyntheticCasterVector + 8),
+            };
+
+            std::uint32_t savedContext[
+                adt::kShadowSyntheticContextCount] = {};
+
+            for (
+                std::size_t i = 0;
+                i < adt::kShadowSyntheticContextCount;
+                ++i)
+            {
+                savedContext[i] =
+                    *reinterpret_cast<const std::uint32_t*>(
+                        adt::kShadowSyntheticContextBase +
+                        i * sizeof(std::uint32_t));
+            }
+
+            const auto restoreSyntheticGlobals =
+                [&savedVector, &savedContext]()
+                {
+                    *reinterpret_cast<float*>(
+                        adt::kShadowSyntheticCasterVector + 0) =
+                            savedVector[0];
+
+                    *reinterpret_cast<float*>(
+                        adt::kShadowSyntheticCasterVector + 4) =
+                            savedVector[1];
+
+                    *reinterpret_cast<float*>(
+                        adt::kShadowSyntheticCasterVector + 8) =
+                            savedVector[2];
+
+                    for (
+                        std::size_t i = 0;
+                        i < adt::kShadowSyntheticContextCount;
+                        ++i)
+                    {
+                        *reinterpret_cast<std::uint32_t*>(
+                            adt::kShadowSyntheticContextBase +
+                            i * sizeof(std::uint32_t)) =
+                                savedContext[i];
+                    }
+                };
+
+            // Exact stock state immediately before D43160.
+            *reinterpret_cast<float*>(
+                adt::kShadowSyntheticCasterVector + 0) =
+                    1.0f;
+
+            *reinterpret_cast<float*>(
+                adt::kShadowSyntheticCasterVector + 4) =
+                    0.0f;
+
+            *reinterpret_cast<float*>(
+                adt::kShadowSyntheticCasterVector + 8) =
+                    0.0f;
+
+            for (
+                std::size_t i = 0;
+                i < adt::kShadowSyntheticContextCount;
+                ++i)
+            {
+                *reinterpret_cast<std::uint32_t*>(
+                    adt::kShadowSyntheticContextBase +
+                    i * sizeof(std::uint32_t)) =
+                        *reinterpret_cast<const std::uint32_t*>(
+                            synthetic +
+                            adt::kShadowSyntheticContextObjectBase +
+                            i * sizeof(std::uint32_t));
+            }
+
+            *reinterpret_cast<std::int32_t*>(
+                synthetic +
+                adt::kShadowSyntheticMode) =
+                    3;
+
+            const std::int32_t generationToken =
+                static_cast<std::int32_t>(
+                    *reinterpret_cast<const std::uint8_t*>(
+                        adt::kShadowGenerationByte));
+
+            const std::int32_t beforeActiveIndex =
+                *reinterpret_cast<const std::int32_t*>(
+                    synthetic +
+                    adt::kShadowActiveCascadeIndex);
+
+            const std::int32_t beforeState =
+                *reinterpret_cast<const std::int32_t*>(
+                    synthetic +
+                    adt::kShadowStateField);
+
+            WLOG_INFO(
+                "wxl-modern-r5b2f3: joined proof prepare "
+                "object=%p mode=3 generation=%d "
+                "activeIndexBefore=%d stateBefore=%d "
+                "postBuildHelper=1 builderSlot=0 extent=540 "
+                "casterPassPending=1 receiverBound=0",
+                syntheticObject,
+                static_cast<int>(generationToken),
+                static_cast<int>(beforeActiveIndex),
+                static_cast<int>(beforeState));
+
+            const std::int32_t finalizerResult =
+                finalizer(
+                    syntheticObject,
+                    generationToken);
+
+            const std::int32_t afterActiveIndex =
+                *reinterpret_cast<const std::int32_t*>(
+                    synthetic +
+                    adt::kShadowActiveCascadeIndex);
+
+            const std::int32_t afterState =
+                *reinterpret_cast<const std::int32_t*>(
+                    synthetic +
+                    adt::kShadowStateField);
+
+            if (finalizerResult != 1)
+            {
+                restoreSyntheticGlobals();
+
+                WLOG_WARN(
+                    "wxl-modern-r5b2f3: joined proof refused "
+                    "finalizerResult=%d "
+                    "globalsRestored=1 receiverBound=0",
+                    static_cast<int>(finalizerResult));
+
+                return;
+            }
+
+            const auto callback =
+                reinterpret_cast<
+                    adt::ShadowCascadeRenderCallbackFn>(
+                    *reinterpret_cast<void* const*>(
+                        adt::kShadowRenderCallbackPtr));
+
+            const auto resolve =
+                reinterpret_cast<
+                    adt::Map_TexResolveFn>(
+                    adt::kTexResolve);
+
+            if (
+                !callback ||
+                reinterpret_cast<uintptr_t>(callback) !=
+                    adt::kShadowCascadeRenderCallback ||
+                !resolve)
+            {
+                restoreSyntheticGlobals();
+
+                WLOG_WARN(
+                    "wxl-modern-r5b2f3: joined proof refused "
+                    "callback=%p expectedCallback=0x%08X "
+                    "resolve=%p globalsRestored=1 "
+                    "receiverBound=0",
+                    reinterpret_cast<void*>(callback),
+                    static_cast<unsigned>(
+                        adt::kShadowCascadeRenderCallback),
+                    reinterpret_cast<void*>(resolve));
+
+                return;
+            }
+
+            const std::int32_t shadowGroup =
+                *reinterpret_cast<const std::int32_t*>(
+                    adt::kShadowGroup);
+
+            void* renderTexture = nullptr;
+            void* destinationTexture = nullptr;
+
+            if (shadowGroup != 0)
+            {
+                void* const sharedHandle =
+                    *reinterpret_cast<void* const*>(
+                        adt::kShadowCasterSharedResource);
+
+                if (!sharedHandle)
+                {
+                    restoreSyntheticGlobals();
+
+                    WLOG_WARN(
+                        "wxl-modern-r5b2f3: joined proof refused "
+                        "shared caster resource null "
+                        "globalsRestored=1 receiverBound=0");
+
+                    return;
+                }
+
+                // Exact native synthetic arg3.
+                renderTexture =
+                    resolve(
+                        sharedHandle,
+                        1,
+                        0);
+
+                // Substitute only the proven extension-owned fourth
+                // destination for the stock temporary destination.
+                destinationTexture =
+                    g_classicCascade4.gxObject;
+            }
+            else
+            {
+                // Native group-0 contract puts the per-cascade texture
+                // in arg3 and leaves arg4 null.
+                renderTexture =
+                    g_classicCascade4.gxObject;
+
+                destinationTexture =
+                    nullptr;
+            }
+
+            if (
+                !renderTexture ||
+                (
+                    shadowGroup != 0 &&
+                    !destinationTexture
+                ))
+            {
+                restoreSyntheticGlobals();
+
+                WLOG_WARN(
+                    "wxl-modern-r5b2f3: joined proof refused "
+                    "shadowGroup=%d renderTexture=%p "
+                    "destinationTexture=%p "
+                    "globalsRestored=1 receiverBound=0",
+                    static_cast<int>(shadowGroup),
+                    renderTexture,
+                    destinationTexture);
+
+                return;
+            }
+
+            const uintptr_t casterState =
+                adt::kShadowCasterStateBase;
+
+            const std::uint32_t work0 =
+                *reinterpret_cast<const std::uint32_t*>(
+                    casterState +
+                    adt::kShadowCasterWorkField0);
+
+            const std::uint32_t work10 =
+                *reinterpret_cast<const std::uint32_t*>(
+                    casterState +
+                    adt::kShadowCasterWorkField10);
+
+            const std::uint32_t work1C =
+                *reinterpret_cast<const std::uint32_t*>(
+                    casterState +
+                    adt::kShadowCasterWorkField1C);
+
+            const bool expectedFullCaster =
+                work0 != 0 ||
+                work10 != 0 ||
+                work1C != 0;
+
+            WLOG_INFO(
+                "wxl-modern-r5b2f3: joined caster invoke "
+                "object=%p legalIndex=0 "
+                "extent=540 matrix00=%.9g "
+                "finalizerResult=%d "
+                "activeIndexAfter=%d stateAfter=%d "
+                "shadowGroup=%d "
+                "renderTexture=%p destinationTexture=%p "
+                "arg5=0x%08X "
+                "workState=%08X/%08X/%08X "
+                "expectedPath=%s "
+                "sidecarTarget=1 receiverBound=0",
+                syntheticObject,
+                static_cast<double>(matrix[0]),
+                static_cast<int>(finalizerResult),
+                static_cast<int>(afterActiveIndex),
+                static_cast<int>(afterState),
+                static_cast<int>(shadowGroup),
+                renderTexture,
+                destinationTexture,
+                static_cast<unsigned>(
+                    adt::kShadowSyntheticCasterVector),
+                static_cast<unsigned>(work0),
+                static_cast<unsigned>(work10),
+                static_cast<unsigned>(work1C),
+                expectedFullCaster
+                    ? "full-caster"
+                    : "fast-transfer");
+
+            const std::int32_t casterResult =
+                callback(
+                    syntheticObject,
+                    0,
+                    renderTexture,
+                    destinationTexture,
+                    reinterpret_cast<void*>(
+                        adt::kShadowSyntheticCasterVector));
+
+            // Restore only after the native caster has consumed the
+            // temporary synthetic globals.
+            restoreSyntheticGlobals();
+
+            const bool casterProof =
+                casterResult == 1;
+
+            WLOG_INFO(
+                "wxl-modern-r5b2f3: joined caster returned "
+                "finalizerResult=%d callbackResult=%d "
+                "casterProof=%u expectedPath=%s "
+                "extent=540 legalIndex=0 "
+                "sidecarTarget=1 globalsRestored=1 "
+                "receiverBound=0",
+                static_cast<int>(finalizerResult),
+                static_cast<int>(casterResult),
+                casterProof ? 1u : 0u,
+                expectedFullCaster
+                    ? "full-caster"
+                    : "fast-transfer");
+
+            return;
+
         }
 
         void TryCascade2CasterIntoSidecarProof(

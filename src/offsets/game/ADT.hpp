@@ -844,6 +844,35 @@ namespace wxl::offsets::game::adt
     // Exact arg3 supplied by the stock synthetic path to D4315C.
     constexpr uintptr_t kShadowSyntheticBuilderVector       = 0x00D43278;
 
+    // R5B2-F1 exact native synthetic continuation after D4315C:
+    //
+    //   ECX = syntheticObject + 0x6C
+    //   arg1 = syntheticObject + 0x24
+    //   call 0x00983990
+    constexpr uintptr_t kShadowSyntheticPostBuildHelper     = 0x00983990;
+    constexpr size_t    kShadowSyntheticPostBuildArgument   = 0x0024;
+
+    // Native synthetic context exported immediately after the helper.
+    //
+    // D43278..D43280 = {1,0,0}
+    // D43170..D4317C = syntheticObject + 0x900..0x90C
+    constexpr uintptr_t kShadowSyntheticCasterVector        = 0x00D43278;
+    constexpr uintptr_t kShadowSyntheticContextBase         = 0x00D43170;
+    constexpr size_t    kShadowSyntheticContextObjectBase   = 0x0900;
+    constexpr size_t    kShadowSyntheticContextCount        = 4;
+
+    // Stock synthetic path stores 3 into object+0 before D43160.
+    constexpr size_t    kShadowSyntheticMode                = 0x0000;
+
+    // Exact registered finalizer.
+    constexpr uintptr_t kShadowFinalizerCallbackPtr         = 0x00D43160;
+    constexpr uintptr_t kShadowFinalizerCallback            = 0x007BD200;
+
+    // The synthetic path supplies this byte as finalizer arg2 at Tier 5.
+    // Exact registered 0x7BD200 does not read arg2, but preserve the
+    // native calling contract.
+    constexpr uintptr_t kShadowGenerationByte               = 0x00D4316C;
+
     // Native per-cascade shadow-resource records.
     //
     // R5A13 + R5B2-A5 prove exactly three records, stride 0x3C:
@@ -1004,6 +1033,23 @@ namespace wxl::offsets::game::adt
             void* builderVector,
             void* shadowObject,
             int32_t builderSlot);
+
+    // 0x983990 is called as a one-argument thiscall:
+    //   ECX = synthetic slot-0 record
+    //   stack arg1 = syntheticObject + 0x24.
+    using ShadowSyntheticPostBuildFn =
+        void(__fastcall*)(
+            void* cascadeRecord,
+            void* unusedEdx,
+            void* objectArgument);
+
+    // Both recovered callers push two arguments and clean eight bytes.
+    // The registered 0x7BD200 body consumes arg1 at [EBP+8] as the
+    // shadow object and does not read arg2.
+    using ShadowFinalizerFn =
+        int32_t(__cdecl*)(
+            void* shadowObject,
+            int32_t generationToken);
 
     using RenderShadowCascadesFn = void(__cdecl*)(void* shadowObject);
 
