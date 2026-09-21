@@ -4024,7 +4024,46 @@ namespace wxl::scripts::render_modern::shadows
                         continue;
                     }
 
-                    normalized += line;
+                    std::string assemblyLine =
+                        line;
+
+                    // D3DDisassemble emits constant declarations using
+                    // readable "reg = values" syntax, while D3DAssemble
+                    // requires ordinary assembly operand syntax:
+                    //
+                    //     def c0 = x, y, z, w
+                    //       ->
+                    //     def c0, x, y, z, w
+                    //
+                    // Restrict the rewrite to definition instructions only.
+                    if (
+                        assemblyLine.compare(
+                            0,
+                            4,
+                            "def ") == 0 ||
+                        assemblyLine.compare(
+                            0,
+                            5,
+                            "defi ") == 0 ||
+                        assemblyLine.compare(
+                            0,
+                            5,
+                            "defb ") == 0)
+                    {
+                        const std::size_t equals =
+                            assemblyLine.find(
+                                " = ");
+
+                        if (equals != std::string::npos)
+                        {
+                            assemblyLine.replace(
+                                equals,
+                                3,
+                                ", ");
+                        }
+                    }
+
+                    normalized += assemblyLine;
                     normalized += '\n';
                 }
 
