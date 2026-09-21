@@ -3980,11 +3980,57 @@ namespace wxl::scripts::render_modern::shadows
                 return nullptr;
             }
 
-            const std::string text(
+            std::string text(
                 static_cast<const char*>(
                     textBlob->GetBufferPointer()));
 
             textBlob->Release();
+
+            // D3DDisassemble may prepend human-readable metadata which
+            // D3DAssemble does not necessarily accept as shader source.
+            // Keep only the actual ps_3_0 program and strip comment-only
+            // disassembly lines before applying the fourth-cascade surgery.
+            const std::size_t profileStart =
+                text.find(
+                    "ps_3_0");
+
+            if (profileStart == std::string::npos)
+                return nullptr;
+
+            text.erase(
+                0,
+                profileStart);
+
+            {
+                const std::vector<ShaderLine> sourceLines =
+                    SplitShaderLines(
+                        text);
+
+                std::string normalized;
+
+                for (const ShaderLine& sourceLine : sourceLines)
+                {
+                    const std::string& line =
+                        sourceLine.text;
+
+                    if (
+                        line.empty() ||
+                        line.compare(
+                            0,
+                            2,
+                            "//") == 0 ||
+                        line[0] == ';')
+                    {
+                        continue;
+                    }
+
+                    normalized += line;
+                    normalized += '\n';
+                }
+
+                text.swap(
+                    normalized);
+            }
 
             const std::string patched =
                 InjectClassicCascade4Receiver(
