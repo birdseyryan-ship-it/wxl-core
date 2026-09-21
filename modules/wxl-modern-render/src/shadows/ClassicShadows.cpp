@@ -39,6 +39,12 @@ namespace wxl::scripts::render_modern::shadows
             bool allocationAttempted = false;
             bool casterProofReturned = false;
 
+            // G2 stores the continuously-generated launch-Classic
+            // fourth-cascade projection for the later receiver tranche.
+            float matrix[16] = {};
+            bool matrixValid = false;
+            std::uint64_t geometryFrames = 0;
+
             // Exact launch-Classic fourth-band half extent established
             // by R5A12.  Matrix/caster use comes in later B2 tranches.
             float extent = 540.0f;
@@ -159,6 +165,32 @@ namespace wxl::scripts::render_modern::shadows
                 const DWORD count =
                     GetEnvironmentVariableA(
                         "WXL_CLASSIC_SHADOW_CLONE540_PROOF",
+                        raw,
+                        sizeof(raw));
+
+                if (count == 0 || count >= sizeof(raw))
+                    return false;
+
+                const char c = raw[0];
+
+                return
+                    c != '0' &&
+                    c != 'n' && c != 'N' &&
+                    c != 'f' && c != 'F';
+            }();
+
+            return enabled;
+        }
+
+        bool ClassicShadowGeometryProofEnabled()
+        {
+            static const bool enabled = []()
+            {
+                char raw[16] = {};
+
+                const DWORD count =
+                    GetEnvironmentVariableA(
+                        "WXL_CLASSIC_SHADOW_GEOMETRY_PROOF",
                         raw,
                         sizeof(raw));
 
@@ -1320,6 +1352,704 @@ namespace wxl::scripts::render_modern::shadows
 
         }
 
+        void PrepareClassicShadowGeometry(
+            void* shadowObject)
+        {
+            if (
+                !ClassicShadowGeometryProofEnabled() ||
+                !shadowObject)
+            {
+                return;
+            }
+
+            const std::int32_t quality =
+                *reinterpret_cast<const std::int32_t*>(
+                    adt::kEffectiveShadowQuality);
+
+            const std::int32_t mapDimension =
+                *reinterpret_cast<const std::int32_t*>(
+                    adt::kShadowMapDimension);
+
+            if (
+                quality != 5 ||
+                mapDimension != 2048)
+            {
+                return;
+            }
+
+            auto* const bytes =
+                static_cast<std::uint8_t*>(
+                    shadowObject);
+
+            // Classic launch geometry for the two near cascades.
+            //
+            // Slot 2 deliberately remains 640 during the stock build.
+            // That preserves Wrath's proven broad caster candidate set,
+            // which safely contains every caster needed by both the
+            // later 180 map and the extension-owned 540 map.
+            constexpr float stockBuildExtents[3] =
+            {
+                20.0f,
+                60.0f,
+                640.0f,
+            };
+
+            for (std::size_t slot = 0; slot < 3; ++slot)
+            {
+                *reinterpret_cast<float*>(
+                    bytes +
+                    adt::kShadowSyntheticExtent +
+                    slot * sizeof(float)) =
+                        stockBuildExtents[slot];
+
+                const uintptr_t record =
+                    adt::kShadowTextureRecordBase +
+                    slot *
+                    adt::kShadowTextureRecordStride;
+
+                *reinterpret_cast<float*>(
+                    record +
+                    adt::kShadowCascadeExtent) =
+                        stockBuildExtents[slot];
+            }
+
+            static bool logged = false;
+
+            if (!logged)
+            {
+                logged = true;
+
+                WLOG_INFO(
+                    "wxl-modern-r5b2g2: pre-native geometry "
+                    "stockBuildExtents=20/60/640 "
+                    "mapDimension=2048 "
+                    "slot2BroadCasterCoverage=1 "
+                    "receiver4Bound=0");
+            }
+        }
+
+        bool RenderClassicGeometryTargetFromSlot2(
+            const std::uint8_t* liveSnapshot,
+            float targetExtent,
+            void* targetTexture,
+            float* matrixOut,
+            const char* label,
+            std::uint32_t work0,
+            std::uint32_t work10,
+            std::uint32_t work1C)
+        {
+            if (
+                !liveSnapshot ||
+                !targetTexture ||
+                !matrixOut)
+            {
+                return false;
+            }
+
+            const auto builder =
+                reinterpret_cast<
+                    adt::ShadowCascadeBuildCallbackFn>(
+                    *reinterpret_cast<void* const*>(
+                        adt::kShadowCascadeBuildCallbackPtr));
+
+            const auto callback =
+                reinterpret_cast<
+                    adt::ShadowCascadeRenderCallbackFn>(
+                    *reinterpret_cast<void* const*>(
+                        adt::kShadowRenderCallbackPtr));
+
+            const auto resolve =
+                reinterpret_cast<
+                    adt::Map_TexResolveFn>(
+                    adt::kTexResolve);
+
+            if (
+                !builder ||
+                reinterpret_cast<uintptr_t>(builder) !=
+                    adt::kShadowCascadeBuildCallback ||
+                !callback ||
+                reinterpret_cast<uintptr_t>(callback) !=
+                    adt::kShadowCascadeRenderCallback ||
+                !resolve)
+            {
+                return false;
+            }
+
+            constexpr std::size_t slot = 2;
+
+            alignas(16)
+            std::uint8_t clone[
+                adt::kShadowObjectSize] = {};
+
+            std::memcpy(
+                clone,
+                liveSnapshot,
+                sizeof(clone));
+
+            void* const cloneObject =
+                static_cast<void*>(
+                    clone);
+
+            void* const cloneRecord =
+                clone +
+                adt::kShadowCascadeRecordBase +
+                slot *
+                adt::kShadowCascadeRecordStride;
+
+            float* const cloneMatrix =
+                reinterpret_cast<float*>(
+                    clone +
+                    adt::kShadowCascadeMatrixBase +
+                    slot *
+                    adt::kShadowCascadeMatrixStride);
+
+            *reinterpret_cast<float*>(
+                clone +
+                adt::kShadowSyntheticExtent +
+                slot * sizeof(float)) =
+                    targetExtent;
+
+            constexpr std::size_t boundsStride = 0x10;
+            const std::size_t boundsOffset =
+                slot * boundsStride;
+
+            *reinterpret_cast<float*>(
+                clone +
+                adt::kShadowSyntheticBound0 +
+                boundsOffset) =
+                    -targetExtent;
+
+            *reinterpret_cast<float*>(
+                clone +
+                adt::kShadowSyntheticBound1 +
+                boundsOffset) =
+                    targetExtent;
+
+            *reinterpret_cast<float*>(
+                clone +
+                adt::kShadowSyntheticBound2 +
+                boundsOffset) =
+                    -targetExtent;
+
+            *reinterpret_cast<float*>(
+                clone +
+                adt::kShadowSyntheticBound3 +
+                boundsOffset) =
+                    targetExtent;
+
+            *reinterpret_cast<float*>(
+                clone +
+                adt::kShadowSyntheticSeed0 +
+                boundsOffset) =
+                    0.0f;
+
+            *reinterpret_cast<float*>(
+                clone +
+                adt::kShadowSyntheticSeed1 +
+                boundsOffset) =
+                    1.0f;
+
+            *reinterpret_cast<float*>(
+                clone +
+                adt::kShadowSyntheticSeed2 +
+                boundsOffset) =
+                    0.0f;
+
+            *reinterpret_cast<float*>(
+                clone +
+                adt::kShadowSyntheticSeed3 +
+                boundsOffset) =
+                    1.0f;
+
+            const uintptr_t nativeRecord =
+                adt::kShadowTextureRecordBase +
+                slot *
+                adt::kShadowTextureRecordStride;
+
+            void* const recordArgument =
+                reinterpret_cast<void*>(
+                    nativeRecord +
+                    adt::kShadowCasterRecordArgument);
+
+            const uintptr_t casterState =
+                adt::kShadowCasterStateBase +
+                slot *
+                adt::kShadowCasterStateStride;
+
+            std::uint8_t nativeRecordSnapshot[
+                adt::kShadowTextureRecordStride] = {};
+
+            std::uint8_t casterStateSnapshot[
+                adt::kShadowCasterStateStride] = {};
+
+            std::memcpy(
+                nativeRecordSnapshot,
+                reinterpret_cast<const void*>(
+                    nativeRecord),
+                sizeof(nativeRecordSnapshot));
+
+            std::memcpy(
+                casterStateSnapshot,
+                reinterpret_cast<const void*>(
+                    casterState),
+                sizeof(casterStateSnapshot));
+
+            builder(
+                cloneRecord,
+                cloneMatrix,
+                recordArgument,
+                cloneObject,
+                2);
+
+            // Restore any shared CPU-side state immediately after the
+            // matrix builder.  The clone matrix is extension-owned.
+            std::memcpy(
+                reinterpret_cast<void*>(
+                    nativeRecord),
+                nativeRecordSnapshot,
+                sizeof(nativeRecordSnapshot));
+
+            std::memcpy(
+                reinterpret_cast<void*>(
+                    casterState),
+                casterStateSnapshot,
+                sizeof(casterStateSnapshot));
+
+            bool finite = true;
+            bool nonZero = false;
+
+            for (unsigned i = 0; i < 16; ++i)
+            {
+                const float value =
+                    cloneMatrix[i];
+
+                if (
+                    value != value ||
+                    value < -1.0e20f ||
+                    value > 1.0e20f)
+                {
+                    finite = false;
+                }
+
+                if (value != 0.0f)
+                    nonZero = true;
+            }
+
+            if (
+                !finite ||
+                !nonZero)
+            {
+                return false;
+            }
+
+            const std::int32_t shadowGroup =
+                *reinterpret_cast<const std::int32_t*>(
+                    adt::kShadowGroup);
+
+            void* renderTexture = nullptr;
+            void* destinationTexture = nullptr;
+
+            if (shadowGroup != 0)
+            {
+                void* const sharedHandle =
+                    *reinterpret_cast<void* const*>(
+                        adt::kShadowCasterSharedResource);
+
+                if (!sharedHandle)
+                    return false;
+
+                renderTexture =
+                    resolve(
+                        sharedHandle,
+                        1,
+                        0);
+
+                destinationTexture =
+                    targetTexture;
+            }
+            else
+            {
+                renderTexture =
+                    targetTexture;
+
+                destinationTexture =
+                    nullptr;
+            }
+
+            if (
+                !renderTexture ||
+                (
+                    shadowGroup != 0 &&
+                    !destinationTexture
+                ))
+            {
+                return false;
+            }
+
+            // Restore the exact live 640 slot-2 work record before each
+            // caster call so multiple Classic projections can consume
+            // the same broad candidate set independently.
+            std::memcpy(
+                reinterpret_cast<void*>(
+                    casterState),
+                casterStateSnapshot,
+                sizeof(casterStateSnapshot));
+
+            const std::int32_t callbackResult =
+                callback(
+                    cloneObject,
+                    2,
+                    renderTexture,
+                    destinationTexture,
+                    recordArgument);
+
+            std::memcpy(
+                reinterpret_cast<void*>(
+                    nativeRecord),
+                nativeRecordSnapshot,
+                sizeof(nativeRecordSnapshot));
+
+            std::memcpy(
+                reinterpret_cast<void*>(
+                    casterState),
+                casterStateSnapshot,
+                sizeof(casterStateSnapshot));
+
+            if (callbackResult != 1)
+            {
+                WLOG_WARN(
+                    "wxl-modern-r5b2g2: target caster failed "
+                    "label=%s extent=%.9g "
+                    "callbackResult=%d "
+                    "workState=%08X/%08X/%08X "
+                    "legalIndex=2 receiver4Bound=0",
+                    label ? label : "unknown",
+                    static_cast<double>(
+                        targetExtent),
+                    static_cast<int>(
+                        callbackResult),
+                    static_cast<unsigned>(
+                        work0),
+                    static_cast<unsigned>(
+                        work10),
+                    static_cast<unsigned>(
+                        work1C));
+
+                return false;
+            }
+
+            std::memcpy(
+                matrixOut,
+                cloneMatrix,
+                16 * sizeof(float));
+
+            return true;
+        }
+
+        void RenderClassicShadowGeometry(
+            void* shadowObject)
+        {
+            if (
+                !ClassicShadowGeometryProofEnabled() ||
+                !shadowObject ||
+                !g_classicCascade4.resource ||
+                !g_classicCascade4.gxObject)
+            {
+                return;
+            }
+
+            const std::int32_t quality =
+                *reinterpret_cast<const std::int32_t*>(
+                    adt::kEffectiveShadowQuality);
+
+            const std::int32_t mapDimension =
+                *reinterpret_cast<const std::int32_t*>(
+                    adt::kShadowMapDimension);
+
+            if (
+                quality != 5 ||
+                mapDimension != 2048)
+            {
+                return;
+            }
+
+            auto* const liveBytes =
+                static_cast<std::uint8_t*>(
+                    shadowObject);
+
+            const std::int32_t activeIndex =
+                *reinterpret_cast<const std::int32_t*>(
+                    liveBytes +
+                    adt::kShadowActiveCascadeIndex);
+
+            const std::int32_t cascade2Enabled =
+                *reinterpret_cast<const std::int32_t*>(
+                    liveBytes +
+                    adt::kShadowCascadeEnabledBase +
+                    2 *
+                    adt::kShadowCascadeEnabledStride);
+
+            if (
+                activeIndex < 2 ||
+                !cascade2Enabled)
+            {
+                return;
+            }
+
+            constexpr std::size_t slot = 2;
+
+            const uintptr_t nativeRecord =
+                adt::kShadowTextureRecordBase +
+                slot *
+                adt::kShadowTextureRecordStride;
+
+            const float nativeExtent =
+                *reinterpret_cast<const float*>(
+                    nativeRecord +
+                    adt::kShadowCascadeExtent);
+
+            const float objectExtent =
+                *reinterpret_cast<const float*>(
+                    liveBytes +
+                    adt::kShadowSyntheticExtent +
+                    slot * sizeof(float));
+
+            if (
+                nativeExtent != 640.0f ||
+                objectExtent != 640.0f)
+            {
+                WLOG_WARN(
+                    "wxl-modern-r5b2g2: broad slot2 gate failed "
+                    "nativeExtent=%.9g objectExtent=%.9g "
+                    "expected=640 receiver4Bound=0",
+                    static_cast<double>(
+                        nativeExtent),
+                    static_cast<double>(
+                        objectExtent));
+
+                return;
+            }
+
+            const uintptr_t casterState =
+                adt::kShadowCasterStateBase +
+                slot *
+                adt::kShadowCasterStateStride;
+
+            const std::uint32_t work0 =
+                *reinterpret_cast<const std::uint32_t*>(
+                    casterState +
+                    adt::kShadowCasterWorkField0);
+
+            const std::uint32_t work10 =
+                *reinterpret_cast<const std::uint32_t*>(
+                    casterState +
+                    adt::kShadowCasterWorkField10);
+
+            const std::uint32_t work1C =
+                *reinterpret_cast<const std::uint32_t*>(
+                    casterState +
+                    adt::kShadowCasterWorkField1C);
+
+            if (
+                work0 == 0 &&
+                work10 == 0 &&
+                work1C == 0)
+            {
+                return;
+            }
+
+            const auto resolve =
+                reinterpret_cast<
+                    adt::Map_TexResolveFn>(
+                    adt::kTexResolve);
+
+            if (!resolve)
+                return;
+
+            const std::int32_t selector =
+                *reinterpret_cast<const std::int32_t*>(
+                    nativeRecord +
+                    adt::kShadowTextureSelector);
+
+            if (
+                selector < 0 ||
+                selector >=
+                    static_cast<std::int32_t>(
+                        adt::kShadowTextureResourceSlots))
+            {
+                return;
+            }
+
+            void* const nativeHandle =
+                *reinterpret_cast<void* const*>(
+                    nativeRecord +
+                    static_cast<std::size_t>(
+                        selector) *
+                    sizeof(void*));
+
+            if (!nativeHandle)
+                return;
+
+            void* const nativeCascade2Texture =
+                resolve(
+                    nativeHandle,
+                    1,
+                    0);
+
+            if (!nativeCascade2Texture)
+                return;
+
+            alignas(16)
+            std::uint8_t liveSnapshot[
+                adt::kShadowObjectSize] = {};
+
+            std::memcpy(
+                liveSnapshot,
+                shadowObject,
+                sizeof(liveSnapshot));
+
+            float matrix180[16] = {};
+            float matrix540[16] = {};
+
+            const bool rendered180 =
+                RenderClassicGeometryTargetFromSlot2(
+                    liveSnapshot,
+                    180.0f,
+                    nativeCascade2Texture,
+                    matrix180,
+                    "cascade2-180",
+                    work0,
+                    work10,
+                    work1C);
+
+            const bool rendered540 =
+                RenderClassicGeometryTargetFromSlot2(
+                    liveSnapshot,
+                    540.0f,
+                    g_classicCascade4.gxObject,
+                    matrix540,
+                    "cascade4-540",
+                    work0,
+                    work10,
+                    work1C);
+
+            if (
+                !rendered180 ||
+                !rendered540)
+            {
+                WLOG_WARN(
+                    "wxl-modern-r5b2g2: geometry frame incomplete "
+                    "rendered180=%u rendered540=%u "
+                    "receiver4Bound=0",
+                    rendered180 ? 1u : 0u,
+                    rendered540 ? 1u : 0u);
+
+                return;
+            }
+
+            // The native receiver still consumes slots 0..2 at this
+            // stage.  Publish the newly rendered Classic 180 matrix
+            // into legal native slot 2 so its map/matrix pair remains
+            // coherent for the existing three-cascade receiver.
+            std::memcpy(
+                liveBytes +
+                    adt::kShadowCascadeMatrixBase +
+                    slot *
+                    adt::kShadowCascadeMatrixStride,
+                matrix180,
+                sizeof(matrix180));
+
+            *reinterpret_cast<float*>(
+                liveBytes +
+                adt::kShadowSyntheticExtent +
+                slot * sizeof(float)) =
+                    180.0f;
+
+            constexpr std::size_t boundsStride = 0x10;
+            const std::size_t boundsOffset =
+                slot * boundsStride;
+
+            *reinterpret_cast<float*>(
+                liveBytes +
+                adt::kShadowSyntheticBound0 +
+                boundsOffset) =
+                    -180.0f;
+
+            *reinterpret_cast<float*>(
+                liveBytes +
+                adt::kShadowSyntheticBound1 +
+                boundsOffset) =
+                    180.0f;
+
+            *reinterpret_cast<float*>(
+                liveBytes +
+                adt::kShadowSyntheticBound2 +
+                boundsOffset) =
+                    -180.0f;
+
+            *reinterpret_cast<float*>(
+                liveBytes +
+                adt::kShadowSyntheticBound3 +
+                boundsOffset) =
+                    180.0f;
+
+            *reinterpret_cast<float*>(
+                nativeRecord +
+                adt::kShadowCascadeExtent) =
+                    180.0f;
+
+            std::memcpy(
+                g_classicCascade4.matrix,
+                matrix540,
+                sizeof(matrix540));
+
+            g_classicCascade4.matrixValid =
+                true;
+
+            ++g_classicCascade4.geometryFrames;
+
+            if (
+                g_classicCascade4.geometryFrames <= 4)
+            {
+                const float* const matrix20 =
+                    reinterpret_cast<const float*>(
+                        liveBytes +
+                        adt::kShadowCascadeMatrixBase);
+
+                const float* const matrix60 =
+                    reinterpret_cast<const float*>(
+                        liveBytes +
+                        adt::kShadowCascadeMatrixBase +
+                        adt::kShadowCascadeMatrixStride);
+
+                WLOG_INFO(
+                    "wxl-modern-r5b2g2: geometry frame PASS "
+                    "frame=%llu "
+                    "extents=20/60/180/540 "
+                    "scale00=%.9g/%.9g/%.9g/%.9g "
+                    "workState=%08X/%08X/%08X "
+                    "legalCasterIndex=2 "
+                    "sidecarMatrixValid=1 "
+                    "receiver4Bound=0",
+                    static_cast<unsigned long long>(
+                        g_classicCascade4.geometryFrames),
+                    static_cast<double>(
+                        matrix20[0]),
+                    static_cast<double>(
+                        matrix60[0]),
+                    static_cast<double>(
+                        matrix180[0]),
+                    static_cast<double>(
+                        matrix540[0]),
+                    static_cast<unsigned>(
+                        work0),
+                    static_cast<unsigned>(
+                        work10),
+                    static_cast<unsigned>(
+                        work1C));
+            }
+        }
+
         void TryCurrentFrameClone540CasterProof(
             void* shadowObject)
         {
@@ -2298,6 +3028,18 @@ namespace wxl::scripts::render_modern::shadows
 
         void __cdecl hkRenderShadowCascades(void* shadowObject)
         {
+            // G2 prepares the two near Classic ranges before Wrath's
+            // native three-cascade build.  Slot 2 deliberately remains
+            // 640 here so its broad caster candidate set can feed both
+            // the 180 and 540 post-passes.
+            if (
+                ClassicShadowsEnabled() &&
+                shadowObject)
+            {
+                PrepareClassicShadowGeometry(
+                    shadowObject);
+            }
+
             if (g_origRenderShadowCascades)
                 g_origRenderShadowCascades(shadowObject);
 
@@ -2320,6 +3062,14 @@ namespace wxl::scripts::render_modern::shadows
             // Tier-5 contract.  It is deliberately not bound, rendered into,
             // or exposed to a receiver yet.
             EnsureClassicCascade4Resource();
+
+            // R5B2-G2: staged launch-Classic four-band geometry.
+            //
+            // Stock build supplies 20 / 60 / broad-640.  G2 then
+            // rerenders legal slot 2 as 180 and renders the fourth
+            // sidecar as 540 from the same broad full-caster set.
+            RenderClassicShadowGeometry(
+                shadowObject);
 
             // R5B2-G1: current-frame 540 producer join.
             //
