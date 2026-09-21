@@ -32,6 +32,18 @@ namespace wxl::scripts::render_modern::shadows
     {
         adt::RenderShadowCascadesFn g_origRenderShadowCascades = nullptr;
 
+        using BuildShadowCascadesFn =
+            void(__cdecl*)(
+                void* shadowObject,
+                void* context,
+                void* helper,
+                std::int32_t mode);
+
+        BuildShadowCascadesFn
+            g_origBuildShadowCascades = nullptr;
+
+        bool g_classicGeometryBuildHookInstalled = false;
+
         struct ClassicCascade4Sidecar
         {
             void* resource = nullptr;
@@ -1751,6 +1763,7 @@ namespace wxl::scripts::render_modern::shadows
         {
             if (
                 !ClassicShadowGeometryProofEnabled() ||
+                !g_classicGeometryBuildHookInstalled ||
                 !shadowObject ||
                 !g_classicCascade4.resource ||
                 !g_classicCascade4.gxObject)
@@ -3026,20 +3039,45 @@ namespace wxl::scripts::render_modern::shadows
                     : 0u);
         }
 
-        void __cdecl hkRenderShadowCascades(void* shadowObject)
+        void __cdecl hkBuildShadowCascades(
+            void* shadowObject,
+            void* context,
+            void* helper,
+            std::int32_t mode)
         {
-            // G2 prepares the two near Classic ranges before Wrath's
-            // native three-cascade build.  Slot 2 deliberately remains
-            // 640 here so its broad caster candidate set can feed both
-            // the 180 and 540 post-passes.
+            // G2R1 correction:
+            //
+            // 0x874890 is the actual matrix/caster BUILD seam.
+            // The previous G2 candidate prepared extents from the
+            // 0x874FB0 dispatcher hook, which is too late because
+            // 0x874890 has already generated the matrices by then.
+            //
+            // Prepare 20/60/640 here, immediately before the exact
+            // original build call.  Slot 2 remains broad at 640 so
+            // its valid full-caster candidate set covers both the
+            // post-build 180 map and fourth 540 sidecar.
             if (
+                g_classicGeometryBuildHookInstalled &&
                 ClassicShadowsEnabled() &&
+                ClassicShadowGeometryProofEnabled() &&
                 shadowObject)
             {
                 PrepareClassicShadowGeometry(
                     shadowObject);
             }
 
+            if (g_origBuildShadowCascades)
+            {
+                g_origBuildShadowCascades(
+                    shadowObject,
+                    context,
+                    helper,
+                    mode);
+            }
+        }
+
+        void __cdecl hkRenderShadowCascades(void* shadowObject)
+        {
             if (g_origRenderShadowCascades)
                 g_origRenderShadowCascades(shadowObject);
 
@@ -3148,26 +3186,56 @@ namespace wxl::scripts::render_modern::shadows
 
         bool InstallClassicShadowFoundation()
         {
-            const bool installed =
+            // Install the true build seam first.  The hook remains
+            // completely dormant until BOTH hooks have installed and
+            // g_classicGeometryBuildHookInstalled becomes true.
+            const bool buildInstalled =
+                wxl::hook::Install(
+                    "R5ClassicShadowBuild",
+                    adt::kBuildShadowCascades,
+                    &hkBuildShadowCascades,
+                    &g_origBuildShadowCascades);
+
+            const bool renderInstalled =
+                buildInstalled &&
                 wxl::hook::Install(
                     "R5ClassicShadowRenderDispatcher",
                     adt::kRenderShadowCascades,
                     &hkRenderShadowCascades,
                     &g_origRenderShadowCascades);
 
-            if (installed)
+            g_classicGeometryBuildHookInstalled =
+                buildInstalled &&
+                renderInstalled;
+
+            if (g_classicGeometryBuildHookInstalled)
             {
                 WLOG_INFO(
-                    "wxl-modern-r5b1a: Classic shadow foundation installed "
-                    "enabled=%u dispatcher=0x%08X callback=0x%08X",
+                    "wxl-modern-r5b2g2r1: Classic shadow build/render "
+                    "hooks installed enabled=%u "
+                    "build=0x%08X dispatcher=0x%08X "
+                    "callback=0x%08X",
                     ClassicShadowsEnabled() ? 1u : 0u,
+                    static_cast<unsigned>(
+                        adt::kBuildShadowCascades),
                     static_cast<unsigned>(
                         adt::kRenderShadowCascades),
                     static_cast<unsigned>(
                         adt::kShadowCascadeRenderCallback));
             }
+            else
+            {
+                WLOG_WARN(
+                    "wxl-modern-r5b2g2r1: Classic shadow hook install "
+                    "incomplete buildInstalled=%u "
+                    "renderInstalled=%u geometryEnabled=0",
+                    buildInstalled ? 1u : 0u,
+                    renderInstalled ? 1u : 0u);
+            }
 
-            return installed;
+            return
+                buildInstalled &&
+                renderInstalled;
         }
     }
 
