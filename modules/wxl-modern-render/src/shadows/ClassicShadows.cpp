@@ -17,7 +17,6 @@
 #include "offsets/game/ADT.hpp"
 
 #include <windows.h>
-#include <d3d9.h>
 
 #include <cstdint>
 
@@ -68,8 +67,24 @@ namespace wxl::scripts::render_modern::shadows
                 reinterpret_cast<adt::Map_TexResolveFn>(
                     adt::kTexResolve);
 
+            const std::int32_t quality =
+                *reinterpret_cast<const std::int32_t*>(
+                    adt::kEffectiveShadowQuality);
+
+            const std::int32_t mapDimension =
+                *reinterpret_cast<const std::int32_t*>(
+                    adt::kShadowMapDimension);
+
+            const std::int32_t shadowGroup =
+                *reinterpret_cast<const std::int32_t*>(
+                    adt::kShadowGroup);
+
             WLOG_INFO(
-                "wxl-modern-r5b2a: native shadow resource probe begin");
+                "wxl-modern-r5b2a6: native shadow resource probe begin "
+                "quality=%d mapDimension=%d shadowGroup=%d",
+                static_cast<int>(quality),
+                static_cast<int>(mapDimension),
+                static_cast<int>(shadowGroup));
 
             for (unsigned cascade = 0; cascade < 3; ++cascade)
             {
@@ -77,159 +92,150 @@ namespace wxl::scripts::render_modern::shadows
                     adt::kShadowTextureRecordBase +
                     cascade * adt::kShadowTextureRecordStride;
 
-                const int activeSlot =
-                    *reinterpret_cast<const int*>(
+                void* const resourceA =
+                    *reinterpret_cast<void* const*>(
                         record +
-                        adt::kShadowTextureActiveSlot);
+                        adt::kShadowTextureResourceA);
 
-                void* handles[
-                    adt::kShadowTextureSelectableSlots
-                ] = {};
+                void* const resourceB =
+                    *reinterpret_cast<void* const*>(
+                        record +
+                        adt::kShadowTextureResourceB);
 
-                for (
-                    size_t slot = 0;
-                    slot < adt::kShadowTextureSelectableSlots;
-                    ++slot)
-                {
-                    handles[slot] =
-                        *reinterpret_cast<void* const*>(
-                            record +
-                            slot * sizeof(void*));
-                }
+                const float extent =
+                    *reinterpret_cast<const float*>(
+                        record +
+                        adt::kShadowCascadeExtent);
+
+                const float recenterSq =
+                    *reinterpret_cast<const float*>(
+                        record +
+                        adt::kShadowCascadeRecenterSq);
+
+                const std::int32_t selector =
+                    *reinterpret_cast<const std::int32_t*>(
+                        record +
+                        adt::kShadowTextureSelector);
 
                 WLOG_INFO(
-                    "wxl-modern-r5b2a: cascade=%u "
-                    "record=0x%08X activeSlot=%d "
-                    "handles=%p,%p,%p,%p",
+                    "wxl-modern-r5b2a6: cascade=%u "
+                    "record=0x%08X selector=%d "
+                    "resourceA=%p resourceB=%p "
+                    "extent=%.9g recenterSq=%.9g",
                     cascade,
                     static_cast<unsigned>(record),
-                    activeSlot,
-                    handles[0],
-                    handles[1],
-                    handles[2],
-                    handles[3]);
+                    static_cast<int>(selector),
+                    resourceA,
+                    resourceB,
+                    static_cast<double>(extent),
+                    static_cast<double>(recenterSq));
 
                 if (
-                    activeSlot < 0 ||
-                    activeSlot >= static_cast<int>(
-                        adt::kShadowTextureSelectableSlots))
+                    selector < 0 ||
+                    selector >= static_cast<std::int32_t>(
+                        adt::kShadowTextureResourceSlots))
                 {
                     WLOG_WARN(
-                        "wxl-modern-r5b2a: cascade=%u "
-                        "invalid activeSlot=%d",
+                        "wxl-modern-r5b2a6: cascade=%u "
+                        "invalid native resource selector=%d",
                         cascade,
-                        activeSlot);
+                        static_cast<int>(selector));
 
                     continue;
                 }
 
-                void* const handle =
-                    handles[activeSlot];
+                void* const selected =
+                    selector == 0
+                        ? resourceA
+                        : resourceB;
 
-                if (!handle || !resolve)
+                if (!selected)
                 {
                     WLOG_WARN(
-                        "wxl-modern-r5b2a: cascade=%u "
-                        "selected handle unavailable handle=%p "
-                        "resolve=%p",
+                        "wxl-modern-r5b2a6: cascade=%u "
+                        "selected native resource is null "
+                        "selector=%d",
                         cascade,
-                        handle,
-                        resolve);
+                        static_cast<int>(selector));
 
                     continue;
                 }
 
-                void* const raw =
-                    resolve(
-                        handle,
-                        1,
-                        0);
+                const auto* const bytes =
+                    static_cast<const std::uint8_t*>(
+                        selected);
 
-                if (!raw)
+                void* const embeddedGxObject =
+                    *reinterpret_cast<void* const*>(
+                        bytes +
+                        adt::kTextureHandleGxObject);
+
+                const std::uint32_t createArg1 =
+                    *reinterpret_cast<const std::uint32_t*>(
+                        bytes +
+                        adt::kTextureHandleCreateArg1);
+
+                const std::uint16_t width =
+                    *reinterpret_cast<const std::uint16_t*>(
+                        bytes +
+                        adt::kTextureHandleWidth);
+
+                const std::uint16_t height =
+                    *reinterpret_cast<const std::uint16_t*>(
+                        bytes +
+                        adt::kTextureHandleHeight);
+
+                const std::uint32_t createArg5 =
+                    *reinterpret_cast<const std::uint32_t*>(
+                        bytes +
+                        adt::kTextureHandleCreateArg5);
+
+                const std::uint32_t createArg6 =
+                    *reinterpret_cast<const std::uint32_t*>(
+                        bytes +
+                        adt::kTextureHandleCreateArg6);
+
+                const std::uint32_t createFlags =
+                    *reinterpret_cast<const std::uint32_t*>(
+                        bytes +
+                        adt::kTextureHandleCreateFlags);
+
+                void* resolvedGxObject = nullptr;
+
+                if (resolve)
                 {
-                    WLOG_WARN(
-                        "wxl-modern-r5b2a: cascade=%u "
-                        "texture resolve returned null "
-                        "handle=%p",
-                        cascade,
-                        handle);
-
-                    continue;
+                    resolvedGxObject =
+                        resolve(
+                            selected,
+                            1,
+                            0);
                 }
-
-                auto* const texture =
-                    static_cast<IDirect3DTexture9*>(
-                        raw);
-
-                D3DSURFACE_DESC desc = {};
-
-                const HRESULT hr =
-                    texture->GetLevelDesc(
-                        0,
-                        &desc);
-
-                if (FAILED(hr))
-                {
-                    WLOG_WARN(
-                        "wxl-modern-r5b2a: cascade=%u "
-                        "GetLevelDesc failed hr=0x%08X "
-                        "handle=%p raw=%p",
-                        cascade,
-                        static_cast<unsigned>(hr),
-                        handle,
-                        raw);
-
-                    continue;
-                }
-
-                const unsigned format =
-                    static_cast<unsigned>(
-                        desc.Format);
-
-                const char f0 =
-                    static_cast<char>(
-                        format & 0xFFu);
-
-                const char f1 =
-                    static_cast<char>(
-                        (format >> 8) & 0xFFu);
-
-                const char f2 =
-                    static_cast<char>(
-                        (format >> 16) & 0xFFu);
-
-                const char f3 =
-                    static_cast<char>(
-                        (format >> 24) & 0xFFu);
 
                 WLOG_INFO(
-                    "wxl-modern-r5b2a: descriptor "
-                    "cascade=%u handle=%p raw=%p "
+                    "wxl-modern-r5b2a6: metadata "
+                    "cascade=%u selected=%p "
                     "width=%u height=%u "
-                    "format=0x%08X fourcc='%c%c%c%c' "
-                    "usage=0x%08X pool=%u type=%u",
+                    "createArg1=0x%08X "
+                    "createArg5=0x%08X createArg6=0x%08X "
+                    "createFlags=0x%08X "
+                    "embeddedGx=%p resolvedGx=%p match=%u",
                     cascade,
-                    handle,
-                    raw,
-                    static_cast<unsigned>(
-                        desc.Width),
-                    static_cast<unsigned>(
-                        desc.Height),
-                    format,
-                    f0,
-                    f1,
-                    f2,
-                    f3,
-                    static_cast<unsigned>(
-                        desc.Usage),
-                    static_cast<unsigned>(
-                        desc.Pool),
-                    static_cast<unsigned>(
-                        desc.Type));
+                    selected,
+                    static_cast<unsigned>(width),
+                    static_cast<unsigned>(height),
+                    static_cast<unsigned>(createArg1),
+                    static_cast<unsigned>(createArg5),
+                    static_cast<unsigned>(createArg6),
+                    static_cast<unsigned>(createFlags),
+                    embeddedGxObject,
+                    resolvedGxObject,
+                    embeddedGxObject == resolvedGxObject
+                        ? 1u
+                        : 0u);
             }
 
             WLOG_INFO(
-                "wxl-modern-r5b2a: native shadow resource probe end");
+                "wxl-modern-r5b2a6: native shadow resource probe end");
         }
 
         void __cdecl hkRenderShadowCascades(void* shadowObject)
@@ -246,9 +252,9 @@ namespace wxl::scripts::render_modern::shadows
             if (!ClassicShadowsEnabled() || !shadowObject)
                 return;
 
-            // R5B2-A: inspect the exact native texture backing the three
-            // live Wrath cascades once. This is observation-only: no state,
-            // resource or binding is changed.
+            // R5B2-A6: read only native record and engine texture-handle
+            // metadata proven by the Wrath executable. No COM calls are made
+            // and no render/resource state is changed.
             LogNativeShadowResources();
 
             static unsigned logged = 0;

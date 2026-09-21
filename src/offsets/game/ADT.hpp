@@ -814,22 +814,55 @@ namespace wxl::offsets::game::adt
     constexpr uintptr_t kShadowRenderCallbackPtr            = 0x00D43164;
     constexpr uintptr_t kShadowMapDimension                 = 0x00D43150;
     constexpr uintptr_t kEffectiveShadowQuality             = 0x00D43154;
+    constexpr uintptr_t kShadowGroup                        = 0x00D43014;
 
-    // Native per-cascade shadow texture records. R5A13 proved three records,
-    // each 0x3C bytes. Terrain binding selects a texture handle from the first
-    // dwords of each record using the active slot stored at record + 0x38.
+    // Native per-cascade shadow-resource records.
+    //
+    // R5A13 + R5B2-A5 prove exactly three records, stride 0x3C:
+    //
+    //   +0x00  resource handle A
+    //   +0x04  resource handle B
+    //   +0x08  cascade half-extent
+    //   +0x0C  squared recenter threshold
+    //   ...
+    //   +0x38  active A/B resource selector
+    //
+    // The selector is explicitly toggled to 0/1 by the native cascade
+    // updater. It is NOT a four-entry texture selector.
+    //
+    // At Tier 5, resource A is created and resource B is absent.  The three
+    // receiver paths load selector 0/1, index the corresponding first two
+    // dwords, pass the selected engine texture handle through kTexResolve,
+    // and give the resulting Gx texture object to kSetSamplerTexture.
     //
     // Record bases:
     //   cascade 0 -> 0x00D43290
     //   cascade 1 -> 0x00D432CC
     //   cascade 2 -> 0x00D43308
     //
-    // A hypothetical native record 3 would begin at 0x00D43344 and collide
-    // with the live receiver constant block at 0x00D43348; never extend this.
+    // A hypothetical record 3 would begin at 0x00D43344 and collide with
+    // the live receiver constant block at 0x00D43348. Never extend it.
     constexpr uintptr_t kShadowTextureRecordBase            = 0x00D43290;
     constexpr size_t    kShadowTextureRecordStride          = 0x003C;
-    constexpr size_t    kShadowTextureActiveSlot            = 0x0038;
-    constexpr size_t    kShadowTextureSelectableSlots       = 4;
+
+    constexpr size_t kShadowTextureResourceA                = 0x00;
+    constexpr size_t kShadowTextureResourceB                = 0x04;
+    constexpr size_t kShadowCascadeExtent                   = 0x08;
+    constexpr size_t kShadowCascadeRecenterSq               = 0x0C;
+    constexpr size_t kShadowTextureSelector                 = 0x38;
+    constexpr size_t kShadowTextureResourceSlots            = 2;
+
+    // Native texture-handle metadata written by 0x004B8C80.
+    //
+    // kTexResolve returns the engine Gx texture representation stored by the
+    // handle; it is not an IDirect3DTexture9 COM interface.
+    constexpr size_t kTextureHandleGxObject                 = 0x44;
+    constexpr size_t kTextureHandleCreateArg1               = 0x48;
+    constexpr size_t kTextureHandleWidth                    = 0x4C;
+    constexpr size_t kTextureHandleHeight                   = 0x4E;
+    constexpr size_t kTextureHandleCreateArg5               = 0x50;
+    constexpr size_t kTextureHandleCreateArg6               = 0x54;
+    constexpr size_t kTextureHandleCreateFlags              = 0x58;
 
     // Native shadow-object layout proven by R5A13.
     constexpr size_t kShadowCascadeRecordBase               = 0x06C;
