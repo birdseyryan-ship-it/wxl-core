@@ -97,6 +97,32 @@ namespace wxl::scripts::render_modern::shadows
             return enabled;
         }
 
+        bool ClassicShadowMatrixProofEnabled()
+        {
+            static const bool enabled = []()
+            {
+                char raw[16] = {};
+
+                const DWORD count =
+                    GetEnvironmentVariableA(
+                        "WXL_CLASSIC_SHADOW_MATRIX_PROOF",
+                        raw,
+                        sizeof(raw));
+
+                if (count == 0 || count >= sizeof(raw))
+                    return false;
+
+                const char c = raw[0];
+
+                return
+                    c != '0' &&
+                    c != 'n' && c != 'N' &&
+                    c != 'f' && c != 'F';
+            }();
+
+            return enabled;
+        }
+
         void LogNativeShadowResources()
         {
             static bool logged = false;
@@ -575,6 +601,266 @@ namespace wxl::scripts::render_modern::shadows
                 contractMatch ? 1u : 0u);
         }
 
+        void TrySyntheticCascade4MatrixProof()
+        {
+            static bool attempted = false;
+
+            if (
+                !ClassicShadowMatrixProofEnabled() ||
+                attempted)
+            {
+                return;
+            }
+
+            const std::int32_t quality =
+                *reinterpret_cast<const std::int32_t*>(
+                    adt::kEffectiveShadowQuality);
+
+            const std::int32_t mapDimension =
+                *reinterpret_cast<const std::int32_t*>(
+                    adt::kShadowMapDimension);
+
+            if (
+                quality != 5 ||
+                mapDimension != 2048)
+            {
+                return;
+            }
+
+            const auto constructor =
+                reinterpret_cast<
+                    adt::ShadowObjectConstructorFn>(
+                    adt::kShadowObjectConstructor);
+
+            const auto builder =
+                reinterpret_cast<
+                    adt::ShadowCascadeBuildCallbackFn>(
+                    *reinterpret_cast<void* const*>(
+                        adt::kShadowCascadeBuildCallbackPtr));
+
+            if (
+                !constructor ||
+                !builder ||
+                reinterpret_cast<uintptr_t>(builder) !=
+                    adt::kShadowCascadeBuildCallback)
+            {
+                attempted = true;
+
+                WLOG_WARN(
+                    "wxl-modern-r5b2e1: synthetic matrix proof refused "
+                    "constructor=%p builder=%p expectedBuilder=0x%08X",
+                    reinterpret_cast<void*>(constructor),
+                    reinterpret_cast<void*>(builder),
+                    static_cast<unsigned>(
+                        adt::kShadowCascadeBuildCallback));
+
+                return;
+            }
+
+            alignas(16)
+            std::uint8_t synthetic[
+                adt::kShadowObjectSize] = {};
+
+            void* const syntheticObject =
+                static_cast<void*>(synthetic);
+
+            void* const constructed =
+                constructor(
+                    syntheticObject,
+                    nullptr);
+
+            if (constructed != syntheticObject)
+            {
+                attempted = true;
+
+                WLOG_WARN(
+                    "wxl-modern-r5b2e1: synthetic matrix proof refused "
+                    "constructor returned=%p expected=%p",
+                    constructed,
+                    syntheticObject);
+
+                return;
+            }
+
+            const float extent =
+                g_classicCascade4.extent;
+
+            auto writeFloat =
+                [&synthetic](
+                    std::size_t offset,
+                    float value)
+                {
+                    *reinterpret_cast<float*>(
+                        synthetic + offset) =
+                            value;
+                };
+
+            // Exact 0x875F80 pre-builder layout.
+            writeFloat(
+                adt::kShadowSyntheticExtent,
+                extent);
+
+            // Exact x87 store order at 0x8760D6..0x8760FA:
+            // {-extent,+extent,-extent,+extent}.
+            writeFloat(
+                adt::kShadowSyntheticBound0,
+                -extent);
+
+            writeFloat(
+                adt::kShadowSyntheticBound1,
+                extent);
+
+            writeFloat(
+                adt::kShadowSyntheticBound2,
+                -extent);
+
+            writeFloat(
+                adt::kShadowSyntheticBound3,
+                extent);
+
+            // Exact 0x876103..0x876117 seed values.
+            writeFloat(
+                adt::kShadowSyntheticSeed0,
+                0.0f);
+
+            writeFloat(
+                adt::kShadowSyntheticSeed1,
+                1.0f);
+
+            writeFloat(
+                adt::kShadowSyntheticSeed2,
+                0.0f);
+
+            writeFloat(
+                adt::kShadowSyntheticSeed3,
+                1.0f);
+
+            void* const cascadeRecord =
+                synthetic +
+                adt::kShadowCascadeRecordBase;
+
+            float* const matrix =
+                reinterpret_cast<float*>(
+                    synthetic +
+                    adt::kShadowCascadeMatrixBase);
+
+            void* const builderVector =
+                reinterpret_cast<void*>(
+                    adt::kShadowSyntheticBuilderVector);
+
+            attempted = true;
+
+            WLOG_INFO(
+                "wxl-modern-r5b2e1: synthetic matrix build begin "
+                "object=%p record=%p matrix=%p "
+                "builder=%p builderSlot=0 "
+                "extent=%.9g mapDimension=%d "
+                "bounds=%.9g/%.9g/%.9g/%.9g "
+                "seeds=0/1/0/1 "
+                "finalizerCalled=0 casterPass=0 "
+                "renderBound=0 receiverBound=0",
+                syntheticObject,
+                cascadeRecord,
+                matrix,
+                reinterpret_cast<void*>(builder),
+                static_cast<double>(extent),
+                static_cast<int>(mapDimension),
+                static_cast<double>(-extent),
+                static_cast<double>(extent),
+                static_cast<double>(-extent),
+                static_cast<double>(extent));
+
+            // Exact legal native synthetic call shape:
+            //
+            //   push 0
+            //   push syntheticObject
+            //   push 0xD43278
+            //   push syntheticObject+0x9C4
+            //   push syntheticObject+0x6C
+            //   call [0xD4315C]
+            builder(
+                cascadeRecord,
+                matrix,
+                builderVector,
+                syntheticObject,
+                0);
+
+            bool finite = true;
+            bool nonZero = false;
+
+            for (unsigned i = 0; i < 16; ++i)
+            {
+                const float value =
+                    matrix[i];
+
+                if (value != 0.0f)
+                    nonZero = true;
+
+                if (
+                    value != value ||
+                    value < -1.0e20f ||
+                    value > 1.0e20f)
+                {
+                    finite = false;
+                    break;
+                }
+            }
+
+            WLOG_INFO(
+                "wxl-modern-r5b2e1: matrix row0 "
+                "%.9g %.9g %.9g %.9g",
+                static_cast<double>(matrix[0]),
+                static_cast<double>(matrix[1]),
+                static_cast<double>(matrix[2]),
+                static_cast<double>(matrix[3]));
+
+            WLOG_INFO(
+                "wxl-modern-r5b2e1: matrix row1 "
+                "%.9g %.9g %.9g %.9g",
+                static_cast<double>(matrix[4]),
+                static_cast<double>(matrix[5]),
+                static_cast<double>(matrix[6]),
+                static_cast<double>(matrix[7]));
+
+            WLOG_INFO(
+                "wxl-modern-r5b2e1: matrix row2 "
+                "%.9g %.9g %.9g %.9g",
+                static_cast<double>(matrix[8]),
+                static_cast<double>(matrix[9]),
+                static_cast<double>(matrix[10]),
+                static_cast<double>(matrix[11]));
+
+            WLOG_INFO(
+                "wxl-modern-r5b2e1: matrix row3 "
+                "%.9g %.9g %.9g %.9g",
+                static_cast<double>(matrix[12]),
+                static_cast<double>(matrix[13]),
+                static_cast<double>(matrix[14]),
+                static_cast<double>(matrix[15]));
+
+            const std::int32_t activeIndex =
+                *reinterpret_cast<const std::int32_t*>(
+                    synthetic +
+                    adt::kShadowActiveCascadeIndex);
+
+            const std::int32_t state =
+                *reinterpret_cast<const std::int32_t*>(
+                    synthetic +
+                    adt::kShadowStateField);
+
+            WLOG_INFO(
+                "wxl-modern-r5b2e1: synthetic matrix build returned "
+                "extent=%.9g finite=%u nonZero=%u "
+                "activeIndex=%d state=%d "
+                "finalizerCalled=0 casterPass=0 "
+                "renderBound=0 receiverBound=0",
+                static_cast<double>(extent),
+                finite ? 1u : 0u,
+                nonZero ? 1u : 0u,
+                static_cast<int>(activeIndex),
+                static_cast<int>(state));
+        }
+
         void TryCascade2CasterIntoSidecarProof(
             void* shadowObject)
         {
@@ -852,6 +1138,13 @@ namespace wxl::scripts::render_modern::shadows
             // Tier-5 contract.  It is deliberately not bound, rendered into,
             // or exposed to a receiver yet.
             EnsureClassicCascade4Resource();
+
+            // R5B2-E1: independently opt-in build-only proof.
+            //
+            // Construct extension-owned synthetic shadow state and ask
+            // Wrath's exact registered builder for a legal slot-0 matrix.
+            // No finalizer, caster, render-target or receiver call occurs.
+            TrySyntheticCascade4MatrixProof();
 
             // R5B2-D1: opt-in, one-shot target-path proof.  Re-render the
             // already-valid native cascade #2 through the exact native caster

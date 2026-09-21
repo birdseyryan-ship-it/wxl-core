@@ -824,6 +824,26 @@ namespace wxl::offsets::game::adt
     // per-cascade texture itself is callback arg3 and arg4 is null.
     constexpr uintptr_t kShadowCasterSharedResource         = 0x00D43250;
 
+    // R5B2-E1 synthetic single-cascade authority recovered from
+    // the native 0x00875F80 path.
+    //
+    // Constructor:
+    //   ECX = shadow object
+    //   no stack arguments
+    //   EAX = same object pointer on return.
+    //
+    // The constructor's final live fields are +0xA84/+0xA88, so an
+    // extension-owned object requires 0xA8C bytes.
+    constexpr uintptr_t kShadowObjectConstructor            = 0x008753F0;
+    constexpr size_t    kShadowObjectSize                   = 0x0A8C;
+
+    // Runtime callback slot and exact registered target.
+    constexpr uintptr_t kShadowCascadeBuildCallbackPtr      = 0x00D4315C;
+    constexpr uintptr_t kShadowCascadeBuildCallback         = 0x007BAFD0;
+
+    // Exact arg3 supplied by the stock synthetic path to D4315C.
+    constexpr uintptr_t kShadowSyntheticBuilderVector       = 0x00D43278;
+
     // Native per-cascade shadow-resource records.
     //
     // R5A13 + R5B2-A5 prove exactly three records, stride 0x3C:
@@ -936,8 +956,54 @@ namespace wxl::offsets::game::adt
     // Native shadow-object layout proven by R5A13.
     constexpr size_t kShadowCascadeRecordBase               = 0x06C;
     constexpr size_t kShadowCascadeRecordStride             = 0x0F4;
+
+    // Exact stock synthetic-object fields written before the legal
+    // slot-0 D4315C call at 0x0087611D.
+    constexpr size_t kShadowSyntheticExtent                 = 0x0958;
+
+    // Do not assign axis semantics beyond what the disassembly proves.
+    // Stock write order is {-extent,+extent,-extent,+extent}.
+    constexpr size_t kShadowSyntheticBound0                 = 0x0964;
+    constexpr size_t kShadowSyntheticBound1                 = 0x0968;
+    constexpr size_t kShadowSyntheticBound2                 = 0x096C;
+    constexpr size_t kShadowSyntheticBound3                 = 0x0970;
+
+    // Stock seed write order is {0,1,0,1}.
+    constexpr size_t kShadowSyntheticSeed0                  = 0x0994;
+    constexpr size_t kShadowSyntheticSeed1                  = 0x0998;
+    constexpr size_t kShadowSyntheticSeed2                  = 0x099C;
+    constexpr size_t kShadowSyntheticSeed3                  = 0x09A0;
+
+    constexpr size_t kShadowCascadeMatrixBase               = 0x09C4;
+    constexpr size_t kShadowCascadeMatrixStride             = 0x0040;
+
     constexpr size_t kShadowActiveCascadeIndex              = 0x0A84;
     constexpr size_t kShadowStateField                      = 0x0A88;
+
+    // Direct x86 thiscall constructor represented as fastcall so ECX
+    // receives the object and the dummy EDX consumes no stack argument.
+    using ShadowObjectConstructorFn =
+        void*(__fastcall*)(
+            void* shadowObject,
+            void* unusedEdx);
+
+    // Exact five-stack-argument D4315C contract, confirmed by both the
+    // normal cascade builder and native synthetic-object path:
+    //
+    //   arg1 = shadowObject + 0x6C + slot*0xF4
+    //   arg2 = shadowObject + 0x9C4 + slot*0x40
+    //   arg3 = builder/config pointer
+    //   arg4 = root shadow object
+    //   arg5 = legal native/internal slot
+    //
+    // E1 uses slot 0 only.
+    using ShadowCascadeBuildCallbackFn =
+        void(__cdecl*)(
+            void* cascadeRecord,
+            float* matrixDestination,
+            void* builderVector,
+            void* shadowObject,
+            int32_t builderSlot);
 
     using RenderShadowCascadesFn = void(__cdecl*)(void* shadowObject);
 
