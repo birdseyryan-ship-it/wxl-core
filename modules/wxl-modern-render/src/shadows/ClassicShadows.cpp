@@ -21,6 +21,7 @@
 #include <windows.h>
 
 #include <cstdint>
+#include <cstring>
 
 namespace wxl::scripts::render_modern::shadows
 {
@@ -132,6 +133,32 @@ namespace wxl::scripts::render_modern::shadows
                 const DWORD count =
                     GetEnvironmentVariableA(
                         "WXL_CLASSIC_SHADOW_JOINED_PROOF",
+                        raw,
+                        sizeof(raw));
+
+                if (count == 0 || count >= sizeof(raw))
+                    return false;
+
+                const char c = raw[0];
+
+                return
+                    c != '0' &&
+                    c != 'n' && c != 'N' &&
+                    c != 'f' && c != 'F';
+            }();
+
+            return enabled;
+        }
+
+        bool ClassicShadowClone540ProofEnabled()
+        {
+            static const bool enabled = []()
+            {
+                char raw[16] = {};
+
+                const DWORD count =
+                    GetEnvironmentVariableA(
+                        "WXL_CLASSIC_SHADOW_CLONE540_PROOF",
                         raw,
                         sizeof(raw));
 
@@ -1293,6 +1320,729 @@ namespace wxl::scripts::render_modern::shadows
 
         }
 
+        void TryCurrentFrameClone540CasterProof(
+            void* shadowObject)
+        {
+            static bool attempted = false;
+
+            if (
+                !ClassicShadowClone540ProofEnabled() ||
+                attempted ||
+                !shadowObject ||
+                !g_classicCascade4.resource ||
+                !g_classicCascade4.gxObject)
+            {
+                return;
+            }
+
+            const std::int32_t quality =
+                *reinterpret_cast<const std::int32_t*>(
+                    adt::kEffectiveShadowQuality);
+
+            const std::int32_t mapDimension =
+                *reinterpret_cast<const std::int32_t*>(
+                    adt::kShadowMapDimension);
+
+            if (
+                quality != 5 ||
+                mapDimension != 2048)
+            {
+                return;
+            }
+
+            const auto* const liveBytes =
+                static_cast<const std::uint8_t*>(
+                    shadowObject);
+
+            const std::int32_t activeIndex =
+                *reinterpret_cast<const std::int32_t*>(
+                    liveBytes +
+                    adt::kShadowActiveCascadeIndex);
+
+            const std::int32_t cascade2Enabled =
+                *reinterpret_cast<const std::int32_t*>(
+                    liveBytes +
+                    adt::kShadowCascadeEnabledBase +
+                    2 * adt::kShadowCascadeEnabledStride);
+
+            if (
+                activeIndex < 2 ||
+                !cascade2Enabled)
+            {
+                return;
+            }
+
+            const auto builder =
+                reinterpret_cast<
+                    adt::ShadowCascadeBuildCallbackFn>(
+                    *reinterpret_cast<void* const*>(
+                        adt::kShadowCascadeBuildCallbackPtr));
+
+            const auto callback =
+                reinterpret_cast<
+                    adt::ShadowCascadeRenderCallbackFn>(
+                    *reinterpret_cast<void* const*>(
+                        adt::kShadowRenderCallbackPtr));
+
+            const auto resolve =
+                reinterpret_cast<
+                    adt::Map_TexResolveFn>(
+                    adt::kTexResolve);
+
+            if (
+                !builder ||
+                reinterpret_cast<uintptr_t>(builder) !=
+                    adt::kShadowCascadeBuildCallback ||
+                !callback ||
+                reinterpret_cast<uintptr_t>(callback) !=
+                    adt::kShadowCascadeRenderCallback ||
+                !resolve)
+            {
+                attempted = true;
+
+                WLOG_WARN(
+                    "wxl-modern-r5b2g1: proof refused "
+                    "builder=%p expectedBuilder=0x%08X "
+                    "callback=%p expectedCallback=0x%08X "
+                    "resolve=%p receiverBound=0",
+                    reinterpret_cast<void*>(builder),
+                    static_cast<unsigned>(
+                        adt::kShadowCascadeBuildCallback),
+                    reinterpret_cast<void*>(callback),
+                    static_cast<unsigned>(
+                        adt::kShadowCascadeRenderCallback),
+                    reinterpret_cast<void*>(resolve));
+
+                return;
+            }
+
+            constexpr std::size_t slot = 2;
+
+            const uintptr_t nativeRecord =
+                adt::kShadowTextureRecordBase +
+                slot * adt::kShadowTextureRecordStride;
+
+            const float nativeRecordExtent =
+                *reinterpret_cast<const float*>(
+                    nativeRecord +
+                    adt::kShadowCascadeExtent);
+
+            const std::size_t objectExtentOffset =
+                adt::kShadowSyntheticExtent +
+                slot * sizeof(float);
+
+            const float liveObjectExtent =
+                *reinterpret_cast<const float*>(
+                    liveBytes +
+                    objectExtentOffset);
+
+            if (
+                nativeRecordExtent != 640.0f ||
+                liveObjectExtent != 640.0f)
+            {
+                attempted = true;
+
+                WLOG_WARN(
+                    "wxl-modern-r5b2g1: proof refused "
+                    "nativeRecordExtent=%.9g "
+                    "liveObjectExtent=%.9g "
+                    "expected=640 receiverBound=0",
+                    static_cast<double>(
+                        nativeRecordExtent),
+                    static_cast<double>(
+                        liveObjectExtent));
+
+                return;
+            }
+
+            const uintptr_t casterState =
+                adt::kShadowCasterStateBase +
+                slot * adt::kShadowCasterStateStride;
+
+            const std::uint32_t work0Before =
+                *reinterpret_cast<const std::uint32_t*>(
+                    casterState +
+                    adt::kShadowCasterWorkField0);
+
+            const std::uint32_t work10Before =
+                *reinterpret_cast<const std::uint32_t*>(
+                    casterState +
+                    adt::kShadowCasterWorkField10);
+
+            const std::uint32_t work1CBefore =
+                *reinterpret_cast<const std::uint32_t*>(
+                    casterState +
+                    adt::kShadowCasterWorkField1C);
+
+            if (
+                work0Before == 0 &&
+                work10Before == 0 &&
+                work1CBefore == 0)
+            {
+                attempted = true;
+
+                WLOG_WARN(
+                    "wxl-modern-r5b2g1: proof refused "
+                    "live slot2 caster workspace empty "
+                    "workState=%08X/%08X/%08X "
+                    "receiverBound=0",
+                    static_cast<unsigned>(
+                        work0Before),
+                    static_cast<unsigned>(
+                        work10Before),
+                    static_cast<unsigned>(
+                        work1CBefore));
+
+                return;
+            }
+
+            alignas(16)
+            std::uint8_t clone[
+                adt::kShadowObjectSize] = {};
+
+            std::memcpy(
+                clone,
+                shadowObject,
+                sizeof(clone));
+
+            void* const cloneObject =
+                static_cast<void*>(
+                    clone);
+
+            void* const cloneRecord =
+                clone +
+                adt::kShadowCascadeRecordBase +
+                slot * adt::kShadowCascadeRecordStride;
+
+            float* const cloneMatrix =
+                reinterpret_cast<float*>(
+                    clone +
+                    adt::kShadowCascadeMatrixBase +
+                    slot * adt::kShadowCascadeMatrixStride);
+
+            const float* const liveMatrix =
+                reinterpret_cast<const float*>(
+                    liveBytes +
+                    adt::kShadowCascadeMatrixBase +
+                    slot * adt::kShadowCascadeMatrixStride);
+
+            float beforeMatrix[16] = {};
+
+            std::memcpy(
+                beforeMatrix,
+                liveMatrix,
+                sizeof(beforeMatrix));
+
+            // Preserve the entire native cascade-2 resource/config record
+            // and the live slot-2 caster workspace.  The matrix builder is
+            // allowed to consume the exact native record+0x28 contract,
+            // but any incidental writes are restored before the caster is
+            // invoked.  The only retained output is the extension-owned
+            // clone's rebuilt matrix/state.
+            std::uint8_t nativeRecordSnapshot[
+                adt::kShadowTextureRecordStride] = {};
+
+            std::uint8_t casterStateSnapshot[
+                adt::kShadowCasterStateStride] = {};
+
+            std::memcpy(
+                nativeRecordSnapshot,
+                reinterpret_cast<const void*>(
+                    nativeRecord),
+                sizeof(nativeRecordSnapshot));
+
+            std::memcpy(
+                casterStateSnapshot,
+                reinterpret_cast<const void*>(
+                    casterState),
+                sizeof(casterStateSnapshot));
+
+            const float extent =
+                g_classicCascade4.extent;
+
+            *reinterpret_cast<float*>(
+                clone +
+                objectExtentOffset) =
+                    extent;
+
+            const std::size_t boundsStride =
+                0x10;
+
+            const std::size_t boundsOffset =
+                slot * boundsStride;
+
+            *reinterpret_cast<float*>(
+                clone +
+                adt::kShadowSyntheticBound0 +
+                boundsOffset) =
+                    -extent;
+
+            *reinterpret_cast<float*>(
+                clone +
+                adt::kShadowSyntheticBound1 +
+                boundsOffset) =
+                    extent;
+
+            *reinterpret_cast<float*>(
+                clone +
+                adt::kShadowSyntheticBound2 +
+                boundsOffset) =
+                    -extent;
+
+            *reinterpret_cast<float*>(
+                clone +
+                adt::kShadowSyntheticBound3 +
+                boundsOffset) =
+                    extent;
+
+            *reinterpret_cast<float*>(
+                clone +
+                adt::kShadowSyntheticSeed0 +
+                boundsOffset) =
+                    0.0f;
+
+            *reinterpret_cast<float*>(
+                clone +
+                adt::kShadowSyntheticSeed1 +
+                boundsOffset) =
+                    1.0f;
+
+            *reinterpret_cast<float*>(
+                clone +
+                adt::kShadowSyntheticSeed2 +
+                boundsOffset) =
+                    0.0f;
+
+            *reinterpret_cast<float*>(
+                clone +
+                adt::kShadowSyntheticSeed3 +
+                boundsOffset) =
+                    1.0f;
+
+            void* const recordArgument =
+                reinterpret_cast<void*>(
+                    nativeRecord +
+                    adt::kShadowCasterRecordArgument);
+
+            attempted = true;
+
+            WLOG_INFO(
+                "wxl-modern-r5b2g1: clone540 build begin "
+                "liveObject=%p cloneObject=%p "
+                "legalIndex=2 "
+                "liveExtent=%.9g targetExtent=%.9g "
+                "builder=%p builderArg=%p "
+                "workStateBefore=%08X/%08X/%08X "
+                "nativeObjectUntouched=1 "
+                "receiverBound=0",
+                shadowObject,
+                cloneObject,
+                static_cast<double>(
+                    liveObjectExtent),
+                static_cast<double>(
+                    extent),
+                reinterpret_cast<void*>(
+                    builder),
+                recordArgument,
+                static_cast<unsigned>(
+                    work0Before),
+                static_cast<unsigned>(
+                    work10Before),
+                static_cast<unsigned>(
+                    work1CBefore));
+
+            // Exact legal normal-builder callback shape for native slot 2:
+            //
+            //   arg1 = clone + 0x6C + 2*0xF4
+            //   arg2 = clone + 0x9C4 + 2*0x40
+            //   arg3 = native record2 + 0x28
+            //   arg4 = clone root
+            //   arg5 = legal slot 2
+            //
+            // This deliberately does NOT call the three-slot 0x874890
+            // routine and never exposes native index 3.
+            builder(
+                cloneRecord,
+                cloneMatrix,
+                recordArgument,
+                cloneObject,
+                2);
+
+            const bool nativeRecordMutated =
+                std::memcmp(
+                    nativeRecordSnapshot,
+                    reinterpret_cast<const void*>(
+                        nativeRecord),
+                    sizeof(nativeRecordSnapshot)) != 0;
+
+            const bool casterWorkspaceMutated =
+                std::memcmp(
+                    casterStateSnapshot,
+                    reinterpret_cast<const void*>(
+                        casterState),
+                    sizeof(casterStateSnapshot)) != 0;
+
+            // Restore all native/shared proof inputs before the actual
+            // caster callback.  The callback therefore sees the exact
+            // already-proven current-frame slot-2 workspace and record
+            // contract from D1, paired only with the cloned 540 matrix.
+            std::memcpy(
+                reinterpret_cast<void*>(
+                    nativeRecord),
+                nativeRecordSnapshot,
+                sizeof(nativeRecordSnapshot));
+
+            std::memcpy(
+                reinterpret_cast<void*>(
+                    casterState),
+                casterStateSnapshot,
+                sizeof(casterStateSnapshot));
+
+            bool finite = true;
+            bool nonZero = false;
+            unsigned changedCount = 0;
+            float maxAbsDelta = 0.0f;
+
+            for (unsigned i = 0; i < 16; ++i)
+            {
+                const float value =
+                    cloneMatrix[i];
+
+                if (value != 0.0f)
+                    nonZero = true;
+
+                if (
+                    value != value ||
+                    value < -1.0e20f ||
+                    value > 1.0e20f)
+                {
+                    finite = false;
+                }
+
+                const float delta =
+                    value -
+                    beforeMatrix[i];
+
+                const float absDelta =
+                    delta < 0.0f
+                        ? -delta
+                        : delta;
+
+                if (absDelta != 0.0f)
+                    ++changedCount;
+
+                if (absDelta > maxAbsDelta)
+                    maxAbsDelta = absDelta;
+            }
+
+            WLOG_INFO(
+                "wxl-modern-r5b2g1: live640 matrix row0 "
+                "%.9g %.9g %.9g %.9g",
+                static_cast<double>(
+                    beforeMatrix[0]),
+                static_cast<double>(
+                    beforeMatrix[1]),
+                static_cast<double>(
+                    beforeMatrix[2]),
+                static_cast<double>(
+                    beforeMatrix[3]));
+
+            WLOG_INFO(
+                "wxl-modern-r5b2g1: live640 matrix row1 "
+                "%.9g %.9g %.9g %.9g",
+                static_cast<double>(
+                    beforeMatrix[4]),
+                static_cast<double>(
+                    beforeMatrix[5]),
+                static_cast<double>(
+                    beforeMatrix[6]),
+                static_cast<double>(
+                    beforeMatrix[7]));
+
+            WLOG_INFO(
+                "wxl-modern-r5b2g1: live640 matrix row2 "
+                "%.9g %.9g %.9g %.9g",
+                static_cast<double>(
+                    beforeMatrix[8]),
+                static_cast<double>(
+                    beforeMatrix[9]),
+                static_cast<double>(
+                    beforeMatrix[10]),
+                static_cast<double>(
+                    beforeMatrix[11]));
+
+            WLOG_INFO(
+                "wxl-modern-r5b2g1: live640 matrix row3 "
+                "%.9g %.9g %.9g %.9g",
+                static_cast<double>(
+                    beforeMatrix[12]),
+                static_cast<double>(
+                    beforeMatrix[13]),
+                static_cast<double>(
+                    beforeMatrix[14]),
+                static_cast<double>(
+                    beforeMatrix[15]));
+
+            WLOG_INFO(
+                "wxl-modern-r5b2g1: clone540 matrix row0 "
+                "%.9g %.9g %.9g %.9g",
+                static_cast<double>(
+                    cloneMatrix[0]),
+                static_cast<double>(
+                    cloneMatrix[1]),
+                static_cast<double>(
+                    cloneMatrix[2]),
+                static_cast<double>(
+                    cloneMatrix[3]));
+
+            WLOG_INFO(
+                "wxl-modern-r5b2g1: clone540 matrix row1 "
+                "%.9g %.9g %.9g %.9g",
+                static_cast<double>(
+                    cloneMatrix[4]),
+                static_cast<double>(
+                    cloneMatrix[5]),
+                static_cast<double>(
+                    cloneMatrix[6]),
+                static_cast<double>(
+                    cloneMatrix[7]));
+
+            WLOG_INFO(
+                "wxl-modern-r5b2g1: clone540 matrix row2 "
+                "%.9g %.9g %.9g %.9g",
+                static_cast<double>(
+                    cloneMatrix[8]),
+                static_cast<double>(
+                    cloneMatrix[9]),
+                static_cast<double>(
+                    cloneMatrix[10]),
+                static_cast<double>(
+                    cloneMatrix[11]));
+
+            WLOG_INFO(
+                "wxl-modern-r5b2g1: clone540 matrix row3 "
+                "%.9g %.9g %.9g %.9g",
+                static_cast<double>(
+                    cloneMatrix[12]),
+                static_cast<double>(
+                    cloneMatrix[13]),
+                static_cast<double>(
+                    cloneMatrix[14]),
+                static_cast<double>(
+                    cloneMatrix[15]));
+
+            const std::int32_t cloneActiveIndex =
+                *reinterpret_cast<const std::int32_t*>(
+                    clone +
+                    adt::kShadowActiveCascadeIndex);
+
+            const std::int32_t cloneState =
+                *reinterpret_cast<const std::int32_t*>(
+                    clone +
+                    adt::kShadowStateField);
+
+            WLOG_INFO(
+                "wxl-modern-r5b2g1: clone540 build returned "
+                "finite=%u nonZero=%u changedCount=%u "
+                "maxAbsDelta=%.9g "
+                "cloneActiveIndex=%d cloneState=%d "
+                "nativeRecordMutated=%u "
+                "casterWorkspaceMutated=%u "
+                "nativeInputsRestored=1 "
+                "receiverBound=0",
+                finite ? 1u : 0u,
+                nonZero ? 1u : 0u,
+                changedCount,
+                static_cast<double>(
+                    maxAbsDelta),
+                static_cast<int>(
+                    cloneActiveIndex),
+                static_cast<int>(
+                    cloneState),
+                nativeRecordMutated ? 1u : 0u,
+                casterWorkspaceMutated ? 1u : 0u);
+
+            if (
+                !finite ||
+                !nonZero ||
+                changedCount == 0 ||
+                cloneActiveIndex < 2)
+            {
+                WLOG_WARN(
+                    "wxl-modern-r5b2g1: proof refused "
+                    "matrix/state gate finite=%u nonZero=%u "
+                    "changedCount=%u cloneActiveIndex=%d "
+                    "receiverBound=0",
+                    finite ? 1u : 0u,
+                    nonZero ? 1u : 0u,
+                    changedCount,
+                    static_cast<int>(
+                        cloneActiveIndex));
+
+                return;
+            }
+
+            const std::int32_t shadowGroup =
+                *reinterpret_cast<const std::int32_t*>(
+                    adt::kShadowGroup);
+
+            void* renderTexture = nullptr;
+            void* destinationTexture = nullptr;
+
+            if (shadowGroup != 0)
+            {
+                void* const sharedHandle =
+                    *reinterpret_cast<void* const*>(
+                        adt::kShadowCasterSharedResource);
+
+                if (!sharedHandle)
+                {
+                    WLOG_WARN(
+                        "wxl-modern-r5b2g1: proof refused "
+                        "shared caster resource null "
+                        "receiverBound=0");
+
+                    return;
+                }
+
+                renderTexture =
+                    resolve(
+                        sharedHandle,
+                        1,
+                        0);
+
+                destinationTexture =
+                    g_classicCascade4.gxObject;
+            }
+            else
+            {
+                renderTexture =
+                    g_classicCascade4.gxObject;
+
+                destinationTexture =
+                    nullptr;
+            }
+
+            if (
+                !renderTexture ||
+                (
+                    shadowGroup != 0 &&
+                    !destinationTexture
+                ))
+            {
+                WLOG_WARN(
+                    "wxl-modern-r5b2g1: proof refused "
+                    "shadowGroup=%d renderTexture=%p "
+                    "destinationTexture=%p "
+                    "receiverBound=0",
+                    static_cast<int>(
+                        shadowGroup),
+                    renderTexture,
+                    destinationTexture);
+
+                return;
+            }
+
+            const std::uint32_t work0 =
+                *reinterpret_cast<const std::uint32_t*>(
+                    casterState +
+                    adt::kShadowCasterWorkField0);
+
+            const std::uint32_t work10 =
+                *reinterpret_cast<const std::uint32_t*>(
+                    casterState +
+                    adt::kShadowCasterWorkField10);
+
+            const std::uint32_t work1C =
+                *reinterpret_cast<const std::uint32_t*>(
+                    casterState +
+                    adt::kShadowCasterWorkField1C);
+
+            const bool fullCasterPathExpected =
+                work0 != 0 ||
+                work10 != 0 ||
+                work1C != 0;
+
+            if (!fullCasterPathExpected)
+            {
+                WLOG_WARN(
+                    "wxl-modern-r5b2g1: proof refused "
+                    "restored caster workspace unexpectedly empty "
+                    "workState=%08X/%08X/%08X "
+                    "receiverBound=0",
+                    static_cast<unsigned>(
+                        work0),
+                    static_cast<unsigned>(
+                        work10),
+                    static_cast<unsigned>(
+                        work1C));
+
+                return;
+            }
+
+            WLOG_INFO(
+                "wxl-modern-r5b2g1: clone540 caster invoke "
+                "cloneObject=%p legalIndex=2 "
+                "targetExtent=540 "
+                "shadowGroup=%d "
+                "renderTexture=%p destinationTexture=%p "
+                "recordArgument=%p "
+                "workState=%08X/%08X/%08X "
+                "expectedPath=full-caster "
+                "sidecarTarget=1 "
+                "nativeObjectUntouched=1 "
+                "receiverBound=0",
+                cloneObject,
+                static_cast<int>(
+                    shadowGroup),
+                renderTexture,
+                destinationTexture,
+                recordArgument,
+                static_cast<unsigned>(
+                    work0),
+                static_cast<unsigned>(
+                    work10),
+                static_cast<unsigned>(
+                    work1C));
+
+            const std::int32_t callbackResult =
+                callback(
+                    cloneObject,
+                    2,
+                    renderTexture,
+                    destinationTexture,
+                    recordArgument);
+
+            g_classicCascade4.casterProofReturned =
+                callbackResult == 1;
+
+            if (callbackResult != 1)
+            {
+                WLOG_WARN(
+                    "wxl-modern-r5b2g1: clone540 caster "
+                    "unexpected callback result=%d "
+                    "receiverBound=0",
+                    static_cast<int>(
+                        callbackResult));
+            }
+
+            WLOG_INFO(
+                "wxl-modern-r5b2g1: clone540 caster returned "
+                "legalIndex=2 targetExtent=540 "
+                "callbackResult=%d "
+                "expectedPath=full-caster "
+                "casterProof=%u "
+                "sidecar=%p gx=%p "
+                "receiverBound=0 nativeIndex3Used=0",
+                static_cast<int>(
+                    callbackResult),
+                g_classicCascade4.casterProofReturned
+                    ? 1u
+                    : 0u,
+                g_classicCascade4.resource,
+                g_classicCascade4.gxObject);
+        }
+
         void TryCascade2CasterIntoSidecarProof(
             void* shadowObject)
         {
@@ -1570,6 +2320,19 @@ namespace wxl::scripts::render_modern::shadows
             // Tier-5 contract.  It is deliberately not bound, rendered into,
             // or exposed to a receiver yet.
             EnsureClassicCascade4Resource();
+
+            // R5B2-G1: current-frame 540 producer join.
+            //
+            // Clone the already-valid post-native shadow object, rebuild
+            // only legal slot 2 at Classic's 540 half-extent using the
+            // registered native matrix builder, then consume the already
+            // proven current-frame slot-2 full-caster workspace while
+            // redirecting only the destination to the fourth sidecar.
+            //
+            // Native object/cascades are never modified and index 3 is
+            // never presented to native code.
+            TryCurrentFrameClone540CasterProof(
+                shadowObject);
 
             // R5B2-E1: independently opt-in build-only proof.
             //
