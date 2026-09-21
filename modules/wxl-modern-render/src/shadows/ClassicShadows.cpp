@@ -894,7 +894,7 @@ namespace wxl::scripts::render_modern::shadows
                 !g_classicCascade4.gxObject)
             {
                 WLOG_WARN(
-                    "wxl-modern-r5b2f3: joined proof refused "
+                    "wxl-modern-r5b2f4b: joined proof refused "
                     "fourth sidecar unavailable "
                     "resource=%p gx=%p",
                     g_classicCascade4.resource,
@@ -921,7 +921,7 @@ namespace wxl::scripts::render_modern::shadows
                     adt::kShadowFinalizerCallback)
             {
                 WLOG_WARN(
-                    "wxl-modern-r5b2f3: finalizer proof refused "
+                    "wxl-modern-r5b2f4b: finalizer proof refused "
                     "postBuild=%p finalizer=%p "
                     "expectedFinalizer=0x%08X",
                     reinterpret_cast<void*>(postBuild),
@@ -942,8 +942,9 @@ namespace wxl::scripts::render_modern::shadows
                 synthetic +
                     adt::kShadowSyntheticPostBuildArgument);
 
-            // Preserve live global context because F2 is an isolated proof,
-            // not yet the production fourth-cascade path.
+            // Preserve the live global context because F4B remains an
+            // isolated producer proof, not yet the production fourth-cascade
+            // path.
             float savedVector[3] =
             {
                 *reinterpret_cast<const float*>(
@@ -1032,6 +1033,27 @@ namespace wxl::scripts::render_modern::shadows
                     *reinterpret_cast<const std::uint8_t*>(
                         adt::kShadowGenerationByte));
 
+            // R5B2-F4A closes the missing stock transition:
+            //
+            //   0x87617F:
+            //     mov [syntheticObject + 0xA84], EDI
+            //
+            // At Tier 5, EDI is still zero at this instruction.  The
+            // constructor initializes +0xA84 to -1, but the native
+            // synthetic path explicitly activates legal slot 0 before
+            // calling D43160.  F3 omitted this write, which left the
+            // finalizer with activeIndex=-1 and therefore produced an
+            // empty D25320 caster-work record.
+            const std::int32_t constructorActiveIndex =
+                *reinterpret_cast<const std::int32_t*>(
+                    synthetic +
+                    adt::kShadowActiveCascadeIndex);
+
+            *reinterpret_cast<std::int32_t*>(
+                synthetic +
+                adt::kShadowActiveCascadeIndex) =
+                    0;
+
             const std::int32_t beforeActiveIndex =
                 *reinterpret_cast<const std::int32_t*>(
                     synthetic +
@@ -1043,13 +1065,16 @@ namespace wxl::scripts::render_modern::shadows
                     adt::kShadowStateField);
 
             WLOG_INFO(
-                "wxl-modern-r5b2f3: joined proof prepare "
+                "wxl-modern-r5b2f4b: joined proof prepare "
                 "object=%p mode=3 generation=%d "
-                "activeIndexBefore=%d stateBefore=%d "
+                "constructorActiveIndex=%d "
+                "activeIndexBeforeFinalizer=%d stateBefore=%d "
+                "stockSyntheticActivation=1 "
                 "postBuildHelper=1 builderSlot=0 extent=540 "
                 "casterPassPending=1 receiverBound=0",
                 syntheticObject,
                 static_cast<int>(generationToken),
+                static_cast<int>(constructorActiveIndex),
                 static_cast<int>(beforeActiveIndex),
                 static_cast<int>(beforeState));
 
@@ -1073,7 +1098,7 @@ namespace wxl::scripts::render_modern::shadows
                 restoreSyntheticGlobals();
 
                 WLOG_WARN(
-                    "wxl-modern-r5b2f3: joined proof refused "
+                    "wxl-modern-r5b2f4b: joined proof refused "
                     "finalizerResult=%d "
                     "globalsRestored=1 receiverBound=0",
                     static_cast<int>(finalizerResult));
@@ -1101,7 +1126,7 @@ namespace wxl::scripts::render_modern::shadows
                 restoreSyntheticGlobals();
 
                 WLOG_WARN(
-                    "wxl-modern-r5b2f3: joined proof refused "
+                    "wxl-modern-r5b2f4b: joined proof refused "
                     "callback=%p expectedCallback=0x%08X "
                     "resolve=%p globalsRestored=1 "
                     "receiverBound=0",
@@ -1131,7 +1156,7 @@ namespace wxl::scripts::render_modern::shadows
                     restoreSyntheticGlobals();
 
                     WLOG_WARN(
-                        "wxl-modern-r5b2f3: joined proof refused "
+                        "wxl-modern-r5b2f4b: joined proof refused "
                         "shared caster resource null "
                         "globalsRestored=1 receiverBound=0");
 
@@ -1171,7 +1196,7 @@ namespace wxl::scripts::render_modern::shadows
                 restoreSyntheticGlobals();
 
                 WLOG_WARN(
-                    "wxl-modern-r5b2f3: joined proof refused "
+                    "wxl-modern-r5b2f4b: joined proof refused "
                     "shadowGroup=%d renderTexture=%p "
                     "destinationTexture=%p "
                     "globalsRestored=1 receiverBound=0",
@@ -1206,7 +1231,7 @@ namespace wxl::scripts::render_modern::shadows
                 work1C != 0;
 
             WLOG_INFO(
-                "wxl-modern-r5b2f3: joined caster invoke "
+                "wxl-modern-r5b2f4b: joined caster invoke "
                 "object=%p legalIndex=0 "
                 "extent=540 matrix00=%.9g "
                 "finalizerResult=%d "
@@ -1251,7 +1276,7 @@ namespace wxl::scripts::render_modern::shadows
                 casterResult == 1;
 
             WLOG_INFO(
-                "wxl-modern-r5b2f3: joined caster returned "
+                "wxl-modern-r5b2f4b: joined caster returned "
                 "finalizerResult=%d callbackResult=%d "
                 "casterProof=%u expectedPath=%s "
                 "extent=540 legalIndex=0 "
