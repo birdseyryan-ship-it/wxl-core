@@ -864,6 +864,46 @@ namespace wxl::offsets::game::adt
     constexpr size_t kTextureHandleCreateArg6               = 0x54;
     constexpr size_t kTextureHandleCreateFlags              = 0x58;
 
+    // Engine-managed texture-handle creation used directly by the stock
+    // shadow-resource initializer at 0x00875D30.
+    //
+    // R5B2-A5 statically proves an 11-argument __cdecl call.  At Tier 5,
+    // the per-cascade resource-A call is:
+    //
+    //   arg1  = 0
+    //   arg2  = shadow-map width
+    //   arg3  = shadow-map height
+    //   arg4  = 0
+    //   arg5  = native texture-format/class value
+    //   arg6  = native texture-format/class value
+    //   arg7  = native creation flags
+    //   arg8  = 0
+    //   arg9  = 0x005EEB70
+    //   arg10 = 0x009F0E58
+    //   arg11 = 0
+    //
+    // R5B2-A9 live proof establishes 2048x2048, arg5=arg6=0x0C,
+    // flags=0x281 on the accepted Tier-5 runtime.  B1 copies those
+    // variable values from a live native cascade instead of hard-coding
+    // them, while preserving the exact remaining native call contract.
+    constexpr uintptr_t kCreateTextureHandle                = 0x004B8C80;
+    constexpr uintptr_t kShadowTextureCreateOpaqueArg9      = 0x005EEB70;
+    constexpr uintptr_t kShadowTextureCreateOpaqueArg10     = 0x009F0E58;
+
+    using Map_CreateTextureHandleFn =
+        void*(__cdecl*)(
+            uint32_t arg1,
+            uint32_t width,
+            uint32_t height,
+            uint32_t arg4,
+            uint32_t arg5,
+            uint32_t arg6,
+            uint32_t flags,
+            uint32_t arg8,
+            uintptr_t arg9,
+            uintptr_t arg10,
+            uint32_t arg11);
+
     // Native shadow-object layout proven by R5A13.
     constexpr size_t kShadowCascadeRecordBase               = 0x06C;
     constexpr size_t kShadowCascadeRecordStride             = 0x0F4;
