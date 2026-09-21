@@ -16,17 +16,27 @@
 #include "engine/events/EventScript.hpp"
 #include "engine/hook/Hook.hpp"
 #include "engine/hook/Registry.hpp"
+#include "game/Gx.hpp"
+#include "offsets/engine/Shader.hpp"
 #include "offsets/game/ADT.hpp"
 
 #include <windows.h>
+#include <d3d9.h>
+#include <d3dcompiler.h>
 
+#include <cctype>
+#include <cstdio>
 #include <cstdint>
 #include <cstring>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 namespace wxl::scripts::render_modern::shadows
 {
-    namespace adt = wxl::offsets::game::adt;
-    namespace ev  = wxl::events;
+    namespace adt   = wxl::offsets::game::adt;
+    namespace ev    = wxl::events;
+    namespace shoff = wxl::offsets::engine::shader;
 
     namespace
     {
@@ -3073,6 +3083,1307 @@ namespace wxl::scripts::render_modern::shadows
                     : 0u);
         }
 
+
+        // -------------------------------------------------------------------------
+        // R5B2-G3B visible terrain receiver.
+        //
+        // The stock Tier-5 Terrain3_pcf ps_3_0 receiver consumes:
+        //   s5 = auxiliary/static receiver
+        //   s6/s7/s8 = dynamic cascades 20/60/180 after G2R1
+        //
+        // The matching stock terrain VS already exports TEXCOORD3 = world position,
+        // even though the stock PCF PS does not declare that semantic. G3B therefore
+        // extends only the live pixel shader: declare TEXCOORD3 on a free input,
+        // project it through the extension-owned 540 matrix, and consume the sidecar
+        // at s9. Native VS permutations and the first three receiver branches remain
+        // byte-for-byte stock.
+        // -------------------------------------------------------------------------
+
+        using TerrainReceiverDrawFn =
+            adt::Map_SurfaceChunkDrawShaderFn;
+
+        TerrainReceiverDrawFn
+            g_origClassicTerrainReceiverDraw = nullptr;
+
+        bool g_classicReceiverShaderHookInstalled = false;
+
+        std::unordered_map<void*, void*>
+            g_classicReceiverPatchedShaders;
+
+        typedef HRESULT(WINAPI* PFN_D3DAssemble)(
+            LPCVOID,
+            SIZE_T,
+            LPCSTR,
+            const D3D_SHADER_MACRO*,
+            ID3DInclude*,
+            UINT,
+            ID3DBlob**,
+            ID3DBlob**);
+
+        typedef HRESULT(WINAPI* PFN_D3DDisassemble)(
+            LPCVOID,
+            SIZE_T,
+            UINT,
+            LPCSTR,
+            ID3DBlob**);
+
+        bool ClassicShadowReceiverShaderProofEnabled()
+        {
+            static const bool enabled = []()
+            {
+                char raw[16] = {};
+
+                const DWORD count =
+                    GetEnvironmentVariableA(
+                        "WXL_CLASSIC_SHADOW_RECEIVER_SHADER_PROOF",
+                        raw,
+                        sizeof(raw));
+
+                if (count == 0 || count >= sizeof(raw))
+                    return false;
+
+                const char c = raw[0];
+
+                return
+                    c != '0' &&
+                    c != 'n' && c != 'N' &&
+                    c != 'f' && c != 'F';
+            }();
+
+            return enabled;
+        }
+
+        HMODULE ClassicShadowCompiler()
+        {
+            HMODULE compiler =
+                GetModuleHandleA(
+                    "d3dcompiler_47.dll");
+
+            return compiler
+                ? compiler
+                : LoadLibraryA(
+                    "d3dcompiler_47.dll");
+        }
+
+        std::string TrimShaderText(
+            const std::string& value)
+        {
+            std::size_t begin = 0;
+            std::size_t end = value.size();
+
+            while (
+                begin < end &&
+                std::isspace(
+                    static_cast<unsigned char>(
+                        value[begin])))
+            {
+                ++begin;
+            }
+
+            while (
+                end > begin &&
+                std::isspace(
+                    static_cast<unsigned char>(
+                        value[end - 1])))
+            {
+                --end;
+            }
+
+            return
+                value.substr(
+                    begin,
+                    end - begin);
+        }
+
+        int MaxShaderRegister(
+            const std::string& text,
+            char prefix)
+        {
+            int maximum = -1;
+
+            for (
+                std::size_t i = 0;
+                i + 1 < text.size();
+                ++i)
+            {
+                if (text[i] != prefix)
+                    continue;
+
+                if (i > 0)
+                {
+                    const unsigned char previous =
+                        static_cast<unsigned char>(
+                            text[i - 1]);
+
+                    if (
+                        std::isalnum(previous) ||
+                        previous == '_')
+                    {
+                        continue;
+                    }
+                }
+
+                std::size_t j = i + 1;
+                int value = 0;
+                bool any = false;
+
+                while (
+                    j < text.size() &&
+                    std::isdigit(
+                        static_cast<unsigned char>(
+                            text[j])))
+                {
+                    value =
+                        value * 10 +
+                        (text[j] - '0');
+
+                    ++j;
+                    any = true;
+                }
+
+                if (
+                    any &&
+                    value > maximum)
+                {
+                    maximum = value;
+                }
+            }
+
+            return maximum;
+        }
+
+        bool ContainsShaderRegister(
+            const std::string& text,
+            char prefix,
+            int number)
+        {
+            char token[16] = {};
+
+            std::snprintf(
+                token,
+                sizeof(token),
+                "%c%d",
+                prefix,
+                number);
+
+            const std::size_t tokenLength =
+                std::strlen(token);
+
+            std::size_t at = 0;
+
+            while (
+                (at = text.find(
+                    token,
+                    at)) != std::string::npos)
+            {
+                const bool leftOk =
+                    at == 0 ||
+                    !(
+                        std::isalnum(
+                            static_cast<unsigned char>(
+                                text[at - 1])) ||
+                        text[at - 1] == '_');
+
+                const std::size_t after =
+                    at + tokenLength;
+
+                const bool rightOk =
+                    after >= text.size() ||
+                    !std::isdigit(
+                        static_cast<unsigned char>(
+                            text[after]));
+
+                if (
+                    leftOk &&
+                    rightOk)
+                {
+                    return true;
+                }
+
+                at = after;
+            }
+
+            return false;
+        }
+
+        bool FindShaderSemanticRegister(
+            const std::string& text,
+            const char* semantic,
+            std::string& reg)
+        {
+            if (!semantic)
+                return false;
+
+            std::string needle =
+                "dcl_";
+
+            needle += semantic;
+            needle += " ";
+
+            const std::size_t at =
+                text.find(needle);
+
+            if (at == std::string::npos)
+                return false;
+
+            const std::size_t begin =
+                at + needle.size();
+
+            std::size_t end =
+                text.find(
+                    '\n',
+                    begin);
+
+            if (end == std::string::npos)
+                end = text.size();
+
+            reg =
+                TrimShaderText(
+                    text.substr(
+                        begin,
+                        end - begin));
+
+            const std::size_t component =
+                reg.find('.');
+
+            if (component != std::string::npos)
+                reg.resize(component);
+
+            return
+                reg.size() >= 2 &&
+                reg[0] == 'v';
+        }
+
+        std::size_t AfterLastShaderDeclaration(
+            const std::string& text)
+        {
+            std::size_t position = 0;
+            std::size_t best = 0;
+
+            while (position < text.size())
+            {
+                std::size_t end =
+                    text.find(
+                        '\n',
+                        position);
+
+                if (end == std::string::npos)
+                    end = text.size();
+
+                const std::string line =
+                    TrimShaderText(
+                        text.substr(
+                            position,
+                            end - position));
+
+                if (
+                    line.compare(
+                        0,
+                        3,
+                        "dcl") == 0)
+                {
+                    best =
+                        end < text.size()
+                            ? end + 1
+                            : end;
+                }
+
+                position =
+                    end < text.size()
+                        ? end + 1
+                        : end;
+            }
+
+            return best;
+        }
+
+        struct ShaderLine
+        {
+            std::size_t begin = 0;
+            std::size_t end = 0;
+            std::string text;
+        };
+
+        std::vector<ShaderLine>
+        SplitShaderLines(
+            const std::string& text)
+        {
+            std::vector<ShaderLine> lines;
+
+            std::size_t position = 0;
+
+            while (position < text.size())
+            {
+                std::size_t end =
+                    text.find(
+                        '\n',
+                        position);
+
+                if (end == std::string::npos)
+                    end = text.size();
+
+                ShaderLine line;
+                line.begin = position;
+                line.end =
+                    end < text.size()
+                        ? end + 1
+                        : end;
+                line.text =
+                    TrimShaderText(
+                        text.substr(
+                            position,
+                            end - position));
+
+                lines.push_back(line);
+
+                position =
+                    end < text.size()
+                        ? end + 1
+                        : end;
+            }
+
+            return lines;
+        }
+
+        std::string ShaderDestination(
+            const std::string& line)
+        {
+            const std::size_t firstSpace =
+                line.find_first_of(
+                    " \t");
+
+            if (firstSpace == std::string::npos)
+                return std::string();
+
+            const std::size_t comma =
+                line.find(
+                    ',',
+                    firstSpace + 1);
+
+            if (comma == std::string::npos)
+                return std::string();
+
+            return
+                TrimShaderText(
+                    line.substr(
+                        firstSpace + 1,
+                        comma - firstSpace - 1));
+        }
+
+        std::string InjectClassicCascade4Receiver(
+            const std::string& text)
+        {
+            if (
+                text.find("ps_3_0") == std::string::npos ||
+                text.find("dcl_2d s8") == std::string::npos ||
+                text.find("dcl_2d s9") != std::string::npos ||
+                text.find("dcl_texcoord3") != std::string::npos)
+            {
+                return std::string();
+            }
+
+            if (
+                ContainsShaderRegister(
+                    text,
+                    'c',
+                    31) ||
+                ContainsShaderRegister(
+                    text,
+                    'c',
+                    32) ||
+                ContainsShaderRegister(
+                    text,
+                    'c',
+                    33) ||
+                ContainsShaderRegister(
+                    text,
+                    'c',
+                    34) ||
+                ContainsShaderRegister(
+                    text,
+                    'c',
+                    35))
+            {
+                return std::string();
+            }
+
+            std::string tc4;
+            std::string tc5;
+            std::string tc6;
+
+            if (
+                !FindShaderSemanticRegister(
+                    text,
+                    "texcoord4",
+                    tc4) ||
+                !FindShaderSemanticRegister(
+                    text,
+                    "texcoord5",
+                    tc5) ||
+                !FindShaderSemanticRegister(
+                    text,
+                    "texcoord6",
+                    tc6))
+            {
+                return std::string();
+            }
+
+            const int maxInput =
+                MaxShaderRegister(
+                    text,
+                    'v');
+
+            if (
+                maxInput < 0 ||
+                maxInput >= 9 ||
+                ContainsShaderRegister(
+                    text,
+                    'v',
+                    9))
+            {
+                return std::string();
+            }
+
+            const int maxTemp =
+                MaxShaderRegister(
+                    text,
+                    'r');
+
+            if (
+                maxTemp < 0 ||
+                maxTemp + 7 > 31)
+            {
+                return std::string();
+            }
+
+            const std::vector<ShaderLine> lines =
+                SplitShaderLines(
+                    text);
+
+            int firstS8 = -1;
+            int lastS8 = -1;
+            unsigned s8Samples = 0;
+
+            for (
+                std::size_t i = 0;
+                i < lines.size();
+                ++i)
+            {
+                const std::string& line =
+                    lines[i].text;
+
+                const bool textureInstruction =
+                    line.compare(
+                        0,
+                        5,
+                        "texld") == 0;
+
+                if (
+                    textureInstruction &&
+                    line.find("s8") != std::string::npos)
+                {
+                    if (firstS8 < 0)
+                        firstS8 =
+                            static_cast<int>(i);
+
+                    lastS8 =
+                        static_cast<int>(i);
+
+                    ++s8Samples;
+                }
+            }
+
+            if (
+                firstS8 < 0 ||
+                lastS8 < firstS8 ||
+                s8Samples != 5)
+            {
+                return std::string();
+            }
+
+            int finalElse = -1;
+
+            for (
+                int i = firstS8 - 1;
+                i >= 0;
+                --i)
+            {
+                if (lines[i].text == "else")
+                {
+                    finalElse = i;
+                    break;
+                }
+
+                if (
+                    lines[i].text == "endif")
+                {
+                    break;
+                }
+            }
+
+            if (finalElse < 0)
+                return std::string();
+
+            int finalEndif = -1;
+
+            for (
+                std::size_t i =
+                    static_cast<std::size_t>(
+                        lastS8 + 1);
+                i < lines.size();
+                ++i)
+            {
+                if (lines[i].text == "endif")
+                {
+                    finalEndif =
+                        static_cast<int>(i);
+                    break;
+                }
+
+                if (
+                    lines[i].text == "else")
+                {
+                    return std::string();
+                }
+            }
+
+            if (finalEndif <= lastS8)
+                return std::string();
+
+            int resultLine =
+                finalEndif - 1;
+
+            while (
+                resultLine > lastS8 &&
+                lines[resultLine].text.empty())
+            {
+                --resultLine;
+            }
+
+            if (resultLine <= lastS8)
+                return std::string();
+
+            const std::string result =
+                ShaderDestination(
+                    lines[resultLine].text);
+
+            if (
+                result.empty() ||
+                result[0] != 'r')
+            {
+                return std::string();
+            }
+
+            const std::size_t dclAt =
+                AfterLastShaderDeclaration(
+                    text);
+
+            if (dclAt == 0)
+                return std::string();
+
+            const int T0 = maxTemp + 1;
+            const int T1 = maxTemp + 2;
+            const int T2 = maxTemp + 3;
+            const int T3 = maxTemp + 4;
+            const int T4 = maxTemp + 5;
+            const int T5 = maxTemp + 6;
+            const int T6 = maxTemp + 7;
+
+            char line[256] = {};
+            std::string injected;
+
+            std::snprintf(
+                line,
+                sizeof(line),
+                "    mov r%d.xyz, v9\n",
+                T0);
+            injected += line;
+
+            std::snprintf(
+                line,
+                sizeof(line),
+                "    mov r%d.w, c34.z\n",
+                T0);
+            injected += line;
+
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                std::snprintf(
+                    line,
+                    sizeof(line),
+                    "    dp4 r%d.%c, r%d, c%d\n",
+                    T1,
+                    "xyz"[axis],
+                    T0,
+                    31 + axis);
+                injected += line;
+            }
+
+            std::snprintf(
+                line,
+                sizeof(line),
+                "    abs r%d.x, r%d.x\n"
+                "    abs r%d.y, r%d.y\n"
+                "    max r%d.x, r%d.x, r%d.y\n"
+                "    mad_sat r%d.y, r%d.x, c35.x, c35.y\n",
+                T5, T1,
+                T5, T1,
+                T5, T5, T5,
+                T5, T5);
+            injected += line;
+
+            std::snprintf(
+                line,
+                sizeof(line),
+                "    mad r%d.x, r%d.x, c34.x, c34.x\n"
+                "    mad r%d.y, r%d.y, c34.x, c34.x\n"
+                "    mov r%d.w, c34.w\n",
+                T1, T1,
+                T1, T1,
+                T1);
+            injected += line;
+
+            std::snprintf(
+                line,
+                sizeof(line),
+                "    texldl r%d, r%d, s9\n"
+                "    add r%d.xy, r%d, c3\n"
+                "    mov r%d.zw, r%d\n"
+                "    texldl r%d, r%d, s9\n"
+                "    add r%d.x, r%d.x, r%d.x\n",
+                T2, T1,
+                T3, T1,
+                T3, T1,
+                T4, T3,
+                T2, T2, T4);
+            injected += line;
+
+            const int offsetConstants[3] =
+                {5, 7, 9};
+
+            for (int offset : offsetConstants)
+            {
+                std::snprintf(
+                    line,
+                    sizeof(line),
+                    "    add r%d.xy, r%d, c%d\n"
+                    "    texldl r%d, r%d, s9\n"
+                    "    add r%d.x, r%d.x, r%d.x\n",
+                    T3, T1, offset,
+                    T4, T3,
+                    T2, T2, T4);
+                injected += line;
+            }
+
+            std::snprintf(
+                line,
+                sizeof(line),
+                "    mad r%d.x, r%d.x, c34.y, -c34.z\n"
+                "    mad r%d.y, r%d.y, r%d.x, c34.z\n",
+                T2, T2,
+                T2, T5, T2);
+            injected += line;
+
+            std::snprintf(
+                line,
+                sizeof(line),
+                "    abs r%d.x, %s.w\n"
+                "    abs r%d.y, %s.w\n"
+                "    max r%d.z, r%d.x, r%d.y\n"
+                "    mad_sat r%d.z, r%d.z, c35.z, c35.w\n"
+                "    add r%d.z, c34.z, -r%d.z\n",
+                T5, tc4.c_str(),
+                T5, tc5.c_str(),
+                T5, T5, T5,
+                T5, T5,
+                T5, T5);
+            injected += line;
+
+            std::snprintf(
+                line,
+                sizeof(line),
+                "    add r%d.x, r%d.y, -%s\n"
+                "    mad %s, r%d.z, r%d.x, %s\n",
+                T6, T2, result.c_str(),
+                result.c_str(), T5, T6, result.c_str());
+            injected += line;
+
+            const std::string declarations =
+                "    dcl_texcoord3 v9\n"
+                "    dcl_2d s9\n";
+
+            std::string output = text;
+
+            const std::size_t injectAt =
+                lines[finalEndif].begin;
+
+            if (injectAt > dclAt)
+            {
+                output.insert(
+                    injectAt,
+                    injected);
+
+                output.insert(
+                    dclAt,
+                    declarations);
+            }
+            else
+            {
+                return std::string();
+            }
+
+            return output;
+        }
+
+        void* MakeClassicReceiverShaderWrapper(
+            const void* bytecode,
+            std::uint32_t length)
+        {
+            auto* const device =
+                static_cast<IDirect3DDevice9*>(
+                    wxl::game::gx::RawDevice());
+
+            if (
+                !device ||
+                !bytecode ||
+                length == 0)
+            {
+                return nullptr;
+            }
+
+            IDirect3DPixelShader9* shader = nullptr;
+
+            if (
+                FAILED(
+                    device->CreatePixelShader(
+                        static_cast<const DWORD*>(
+                            bytecode),
+                        &shader)) ||
+                !shader)
+            {
+                return nullptr;
+            }
+
+            auto* const copy =
+                new std::uint8_t[length];
+
+            std::memcpy(
+                copy,
+                bytecode,
+                length);
+
+            auto* const wrapper =
+                new std::uint8_t[
+                    shoff::kCgxShaderWrapBytes]();
+
+            *reinterpret_cast<void**>(
+                wrapper +
+                shoff::kCgxShaderHandle) =
+                    shader;
+
+            *reinterpret_cast<std::uint32_t*>(
+                wrapper +
+                shoff::kCgxShaderCreated) =
+                    1;
+
+            *reinterpret_cast<std::uint32_t*>(
+                wrapper +
+                shoff::kCgxShaderByteLen) =
+                    length;
+
+            *reinterpret_cast<const void**>(
+                wrapper +
+                shoff::kCgxShaderBytePtr) =
+                    copy;
+
+            return wrapper;
+        }
+
+        void* BuildClassicCascade4ReceiverShader(
+            void* stock)
+        {
+            if (!stock)
+                return nullptr;
+
+            const auto* const bytecode =
+                *reinterpret_cast<const std::uint8_t* const*>(
+                    static_cast<const std::uint8_t*>(
+                        stock) +
+                    shoff::kCgxShaderBytePtr);
+
+            const std::uint32_t length =
+                *reinterpret_cast<const std::uint32_t*>(
+                    static_cast<const std::uint8_t*>(
+                        stock) +
+                    shoff::kCgxShaderByteLen);
+
+            if (
+                !bytecode ||
+                length < 8 ||
+                length > 0x20000)
+            {
+                return nullptr;
+            }
+
+            std::uint32_t version = 0;
+
+            std::memcpy(
+                &version,
+                bytecode,
+                sizeof(version));
+
+            if (version != 0xFFFF0300u)
+                return nullptr;
+
+            HMODULE const compiler =
+                ClassicShadowCompiler();
+
+            const auto disassemble =
+                reinterpret_cast<PFN_D3DDisassemble>(
+                    compiler
+                        ? GetProcAddress(
+                              compiler,
+                              "D3DDisassemble")
+                        : nullptr);
+
+            const auto assemble =
+                reinterpret_cast<PFN_D3DAssemble>(
+                    compiler
+                        ? GetProcAddress(
+                              compiler,
+                              "D3DAssemble")
+                        : nullptr);
+
+            if (
+                !disassemble ||
+                !assemble)
+            {
+                WLOG_WARN(
+                    "wxl-modern-r5b2g3b: "
+                    "d3dcompiler_47 disassemble/assemble unavailable");
+
+                return nullptr;
+            }
+
+            ID3DBlob* textBlob = nullptr;
+
+            if (
+                FAILED(
+                    disassemble(
+                        bytecode,
+                        length,
+                        0,
+                        nullptr,
+                        &textBlob)) ||
+                !textBlob)
+            {
+                return nullptr;
+            }
+
+            const std::string text(
+                static_cast<const char*>(
+                    textBlob->GetBufferPointer()));
+
+            textBlob->Release();
+
+            const std::string patched =
+                InjectClassicCascade4Receiver(
+                    text);
+
+            if (patched.empty())
+                return nullptr;
+
+            ID3DBlob* codeBlob = nullptr;
+            ID3DBlob* errorBlob = nullptr;
+
+            const HRESULT hr =
+                assemble(
+                    patched.c_str(),
+                    patched.size(),
+                    "wxlClassicCascade4Receiver",
+                    nullptr,
+                    nullptr,
+                    0,
+                    &codeBlob,
+                    &errorBlob);
+
+            if (
+                FAILED(hr) ||
+                !codeBlob)
+            {
+                WLOG_WARN(
+                    "wxl-modern-r5b2g3b: "
+                    "receiver reassemble failed: %s",
+                    errorBlob
+                        ? static_cast<const char*>(
+                              errorBlob->GetBufferPointer())
+                        : "?");
+
+                if (errorBlob)
+                    errorBlob->Release();
+
+                if (codeBlob)
+                    codeBlob->Release();
+
+                return nullptr;
+            }
+
+            if (errorBlob)
+                errorBlob->Release();
+
+            void* const wrapper =
+                MakeClassicReceiverShaderWrapper(
+                    codeBlob->GetBufferPointer(),
+                    static_cast<std::uint32_t>(
+                        codeBlob->GetBufferSize()));
+
+            const std::uint32_t outputLength =
+                static_cast<std::uint32_t>(
+                    codeBlob->GetBufferSize());
+
+            codeBlob->Release();
+
+            if (wrapper)
+            {
+                WLOG_INFO(
+                    "wxl-modern-r5b2g3b: "
+                    "patched Terrain3_pcf receiver "
+                    "stock=%p bytes=%u->%u "
+                    "world=TEXCOORD3 sampler=s9 "
+                    "matrixRegs=c31-c33 "
+                    "filter=5cmp fade540=0.70->0.99",
+                    stock,
+                    static_cast<unsigned>(
+                        length),
+                    static_cast<unsigned>(
+                        outputLength));
+            }
+
+            return wrapper;
+        }
+
+        void* GetClassicCascade4ReceiverShader(
+            void* stock)
+        {
+            const auto found =
+                g_classicReceiverPatchedShaders.find(
+                    stock);
+
+            if (
+                found !=
+                    g_classicReceiverPatchedShaders.end())
+            {
+                return found->second;
+            }
+
+            void* const patched =
+                BuildClassicCascade4ReceiverShader(
+                    stock);
+
+            g_classicReceiverPatchedShaders.emplace(
+                stock,
+                patched);
+
+            return patched;
+        }
+
+        void ReleaseClassicReceiverShaders()
+        {
+            for (
+                auto& entry :
+                g_classicReceiverPatchedShaders)
+            {
+                auto* const wrapper =
+                    static_cast<std::uint8_t*>(
+                        entry.second);
+
+                if (!wrapper)
+                    continue;
+
+                auto* const shader =
+                    *reinterpret_cast<
+                        IDirect3DPixelShader9**>(
+                        wrapper +
+                        shoff::kCgxShaderHandle);
+
+                if (shader)
+                    shader->Release();
+
+                auto* const bytecode =
+                    *reinterpret_cast<
+                        const std::uint8_t**>(
+                        wrapper +
+                        shoff::kCgxShaderBytePtr);
+
+                delete[] bytecode;
+                delete[] wrapper;
+            }
+
+            g_classicReceiverPatchedShaders.clear();
+        }
+
+        void CopyShadowSamplerState8To9(
+            IDirect3DDevice9* device)
+        {
+            if (!device)
+                return;
+
+            const D3DSAMPLERSTATETYPE states[] =
+            {
+                D3DSAMP_ADDRESSU,
+                D3DSAMP_ADDRESSV,
+                D3DSAMP_ADDRESSW,
+                D3DSAMP_BORDERCOLOR,
+                D3DSAMP_MAGFILTER,
+                D3DSAMP_MINFILTER,
+                D3DSAMP_MIPFILTER,
+                D3DSAMP_MIPMAPLODBIAS,
+                D3DSAMP_MAXMIPLEVEL,
+                D3DSAMP_MAXANISOTROPY,
+                D3DSAMP_SRGBTEXTURE,
+                D3DSAMP_ELEMENTINDEX,
+                D3DSAMP_DMAPOFFSET
+            };
+
+            for (
+                const D3DSAMPLERSTATETYPE state :
+                states)
+            {
+                DWORD value = 0;
+
+                if (
+                    SUCCEEDED(
+                        device->GetSamplerState(
+                            8,
+                            state,
+                            &value)))
+                {
+                    device->SetSamplerState(
+                        9,
+                        state,
+                        value);
+                }
+            }
+        }
+
+        void UploadClassicCascade4ReceiverConstants()
+        {
+            float constants[5][4] = {};
+
+            // Native shadow matrices are stored column-major. The stock
+            // terrain VS c37..c48 block consumes the first three matrix
+            // columns as dp4 rows. Preserve that exact convention for the
+            // extension-owned fourth matrix in PS c31..c33.
+            for (int row = 0; row < 3; ++row)
+            {
+                constants[row][0] =
+                    g_classicCascade4.matrix[row + 0];
+                constants[row][1] =
+                    g_classicCascade4.matrix[row + 4];
+                constants[row][2] =
+                    g_classicCascade4.matrix[row + 8];
+                constants[row][3] =
+                    g_classicCascade4.matrix[row + 12];
+            }
+
+            // c34:
+            //   x = projected [-1,+1] -> UV scale/bias
+            //   y = 1/5 for the five hardware comparison results
+            //   z = one
+            //   w = zero / texldl LOD
+            constants[3][0] = 0.5f;
+            constants[3][1] = 0.2f;
+            constants[3][2] = 1.0f;
+            constants[3][3] = 0.0f;
+
+            // c35:
+            //   xy = Classic final-cascade fade 0.70 -> 0.99
+            //   zw = stock Wrath 180-edge transition 0.90 -> 0.99
+            constants[4][0] = -3.44827586f;
+            constants[4][1] =  3.41379310f;
+            constants[4][2] = -11.1111111f;
+            constants[4][3] =  11.0f;
+
+            reinterpret_cast<
+                shoff::ShaderConstantsSetHelperFn>(
+                    shoff::kShaderConstantsSet)(
+                        4,
+                        31,
+                        &constants[0][0],
+                        5);
+        }
+
+        void __fastcall hkClassicTerrainReceiverDraw(
+            void* node,
+            void* edx)
+        {
+            if (
+                !g_origClassicTerrainReceiverDraw ||
+                !ClassicShadowsEnabled() ||
+                !ClassicShadowGeometryProofEnabled() ||
+                !ClassicShadowReceiverBindProofEnabled() ||
+                !ClassicShadowReceiverShaderProofEnabled() ||
+                !g_classicGeometryBuildHookInstalled ||
+                !g_classicReceiverHooksInstalled ||
+                !g_classicReceiverShaderHookInstalled ||
+                !g_classicCascade4.resource ||
+                !g_classicCascade4.gxObject ||
+                !g_classicCascade4.matrixValid)
+            {
+                if (g_origClassicTerrainReceiverDraw)
+                    g_origClassicTerrainReceiverDraw(
+                        node,
+                        edx);
+
+                return;
+            }
+
+            const std::int32_t quality =
+                *reinterpret_cast<const std::int32_t*>(
+                    adt::kEffectiveShadowQuality);
+
+            const std::int32_t mapDimension =
+                *reinterpret_cast<const std::int32_t*>(
+                    adt::kShadowMapDimension);
+
+            if (
+                quality != 5 ||
+                mapDimension != 2048 ||
+                !node)
+            {
+                g_origClassicTerrainReceiverDraw(
+                    node,
+                    edx);
+
+                return;
+            }
+
+            const std::uint32_t layers =
+                *reinterpret_cast<const std::uint8_t*>(
+                    static_cast<const std::uint8_t*>(
+                        node) +
+                    adt::kOffChunkNodeLayerCount);
+
+            if (
+                layers == 0 ||
+                layers > 4)
+            {
+                g_origClassicTerrainReceiverDraw(
+                    node,
+                    edx);
+
+                return;
+            }
+
+            void** const activeShaders =
+                reinterpret_cast<void**>(
+                    adt::kActiveTerrainPs);
+
+            void* const stock =
+                activeShaders[
+                    layers - 1];
+
+            if (!stock)
+            {
+                g_origClassicTerrainReceiverDraw(
+                    node,
+                    edx);
+
+                return;
+            }
+
+            void* const patched =
+                GetClassicCascade4ReceiverShader(
+                    stock);
+
+            if (!patched)
+            {
+                g_origClassicTerrainReceiverDraw(
+                    node,
+                    edx);
+
+                return;
+            }
+
+            void* const gxDevice =
+                *reinterpret_cast<void* const*>(
+                    adt::kGxDeviceSingleton);
+
+            const auto setState =
+                reinterpret_cast<
+                    adt::Map_SamplerBindFn>(
+                    adt::kSetSamplerTexture);
+
+            auto* const rawDevice =
+                static_cast<IDirect3DDevice9*>(
+                    wxl::game::gx::RawDevice());
+
+            if (
+                !gxDevice ||
+                !setState ||
+                !rawDevice)
+            {
+                g_origClassicTerrainReceiverDraw(
+                    node,
+                    edx);
+
+                return;
+            }
+
+            CopyShadowSamplerState8To9(
+                rawDevice);
+
+            UploadClassicCascade4ReceiverConstants();
+
+            setState(
+                gxDevice,
+                nullptr,
+                adt::kClassicCascade4StatePathA,
+                g_classicCascade4.gxObject);
+
+            setState(
+                gxDevice,
+                nullptr,
+                adt::kGxStatePixelShader,
+                patched);
+
+            g_origClassicTerrainReceiverDraw(
+                node,
+                edx);
+
+            setState(
+                gxDevice,
+                nullptr,
+                adt::kGxStatePixelShader,
+                stock);
+
+            setState(
+                gxDevice,
+                nullptr,
+                adt::kClassicCascade4StatePathA,
+                nullptr);
+
+            static unsigned logged = 0;
+
+            if (logged < 6)
+            {
+                ++logged;
+
+                WLOG_INFO(
+                    "wxl-modern-r5b2g3b: "
+                    "receiver draw PASS "
+                    "layers=%u stock=%p patched=%p "
+                    "sampler=s9 matrixValid=1 "
+                    "extents=20/60/180/540 "
+                    "shaderConsumesFourth=1 "
+                    "filter=5cmp",
+                    static_cast<unsigned>(
+                        layers),
+                    stock,
+                    patched);
+            }
+        }
+
         void BindClassicCascade4ReceiverTexture(
             std::int32_t gxTextureState,
             const char* pathName,
@@ -3385,9 +4696,21 @@ namespace wxl::scripts::render_modern::shadows
                 receiverAInstalled &&
                 receiverBInstalled;
 
+            const bool receiverShaderInstalled =
+                g_classicReceiverHooksInstalled &&
+                wxl::hook::Install(
+                    "R5ClassicTerrainReceiverShader",
+                    adt::kSurfaceChunkDrawShader,
+                    &hkClassicTerrainReceiverDraw,
+                    &g_origClassicTerrainReceiverDraw);
+
+            g_classicReceiverShaderHookInstalled =
+                receiverShaderInstalled;
+
             if (
                 g_classicGeometryBuildHookInstalled &&
-                g_classicReceiverHooksInstalled)
+                g_classicReceiverHooksInstalled &&
+                g_classicReceiverShaderHookInstalled)
             {
                 WLOG_INFO(
                     "wxl-modern-r5b2g2r1: Classic shadow build/render "
@@ -3403,10 +4726,10 @@ namespace wxl::scripts::render_modern::shadows
                         adt::kShadowCascadeRenderCallback));
 
                 WLOG_INFO(
-                    "wxl-modern-r5b2g3a: receiver hooks installed "
+                    "wxl-modern-r5b2g3b: receiver hooks installed "
                     "pathA=0x%08X fourthStateA=0x%02X samplerA=t9 "
                     "pathB=0x%08X fourthStateB=0x%02X samplerB=t8 "
-                    "shaderConsumesFourth=0",
+                    "terrainDraw=0x%08X shaderProofEnabled=%u",
                     static_cast<unsigned>(
                         adt::kBindTerrainShadowMap),
                     static_cast<unsigned>(
@@ -3414,25 +4737,32 @@ namespace wxl::scripts::render_modern::shadows
                     static_cast<unsigned>(
                         adt::kBindTerrainShadowMapAlt),
                     static_cast<unsigned>(
-                        adt::kClassicCascade4StatePathB));
+                        adt::kClassicCascade4StatePathB),
+                    static_cast<unsigned>(
+                        adt::kSurfaceChunkDrawShader),
+                    ClassicShadowReceiverShaderProofEnabled()
+                        ? 1u
+                        : 0u);
             }
             else
             {
                 WLOG_WARN(
-                    "wxl-modern-r5b2g3a: Classic shadow hook install "
+                    "wxl-modern-r5b2g3b: Classic shadow hook install "
                     "incomplete build=%u render=%u "
-                    "receiverA=%u receiverB=%u",
+                    "receiverA=%u receiverB=%u receiverShader=%u",
                     buildInstalled ? 1u : 0u,
                     renderInstalled ? 1u : 0u,
                     receiverAInstalled ? 1u : 0u,
-                    receiverBInstalled ? 1u : 0u);
+                    receiverBInstalled ? 1u : 0u,
+                    receiverShaderInstalled ? 1u : 0u);
             }
 
             return
                 buildInstalled &&
                 renderInstalled &&
                 receiverAInstalled &&
-                receiverBInstalled;
+                receiverBInstalled &&
+                receiverShaderInstalled;
         }
     }
 
@@ -3455,6 +4785,8 @@ namespace wxl::scripts::render_modern::shadows
         {
             if (!ClassicShadowsEnabled())
                 return;
+
+            ReleaseClassicReceiverShaders();
 
             ReleaseClassicCascade4Resource(
                 "device-lost");
