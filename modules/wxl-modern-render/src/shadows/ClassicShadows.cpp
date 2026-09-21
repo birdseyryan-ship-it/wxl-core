@@ -4063,6 +4063,61 @@ namespace wxl::scripts::render_modern::shadows
                         }
                     }
 
+                    // The runtime disassembler also emits floating
+                    // immediates in scientific notation, e.g.
+                    //
+                    //     def c0, -3.44827580e+00, ...
+                    //
+                    // D3DAssemble rejects the exponent token in this
+                    // assembly path. Re-emit only float-def operands as
+                    // ordinary fixed-decimal literals.
+                    if (
+                        assemblyLine.compare(
+                            0,
+                            4,
+                            "def ") == 0)
+                    {
+                        const std::size_t firstComma =
+                            assemblyLine.find(
+                                ',');
+
+                        if (firstComma != std::string::npos)
+                        {
+                            double value0 = 0.0;
+                            double value1 = 0.0;
+                            double value2 = 0.0;
+                            double value3 = 0.0;
+
+                            if (
+                                std::sscanf(
+                                    assemblyLine.c_str() +
+                                        firstComma + 1,
+                                    " %lf, %lf, %lf, %lf",
+                                    &value0,
+                                    &value1,
+                                    &value2,
+                                    &value3) == 4)
+                            {
+                                char fixedDef[512] = {};
+
+                                std::snprintf(
+                                    fixedDef,
+                                    sizeof(fixedDef),
+                                    "%s, %.9f, %.9f, %.9f, %.9f",
+                                    assemblyLine.substr(
+                                        0,
+                                        firstComma).c_str(),
+                                    value0,
+                                    value1,
+                                    value2,
+                                    value3);
+
+                                assemblyLine =
+                                    fixedDef;
+                            }
+                        }
+                    }
+
                     normalized += assemblyLine;
                     normalized += '\n';
                 }
