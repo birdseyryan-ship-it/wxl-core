@@ -816,6 +816,14 @@ namespace wxl::offsets::game::adt
     constexpr uintptr_t kEffectiveShadowQuality             = 0x00D43154;
     constexpr uintptr_t kShadowGroup                        = 0x00D43014;
 
+    // R5B2-D1 caster-path authority.
+    //
+    // When kShadowGroup is non-zero, the stock dispatcher resolves this
+    // shared engine texture as callback arg3 and passes the per-cascade
+    // resolved texture as callback arg4.  When kShadowGroup is zero the
+    // per-cascade texture itself is callback arg3 and arg4 is null.
+    constexpr uintptr_t kShadowCasterSharedResource         = 0x00D43250;
+
     // Native per-cascade shadow-resource records.
     //
     // R5A13 + R5B2-A5 prove exactly three records, stride 0x3C:
@@ -852,6 +860,23 @@ namespace wxl::offsets::game::adt
     constexpr size_t kShadowTextureSelector                 = 0x38;
     constexpr size_t kShadowTextureResourceSlots            = 2;
 
+    // 0x874FB0 passes record+0x28 as callback arg5.
+    constexpr size_t kShadowCasterRecordArgument            = 0x28;
+
+    // Per-cascade dispatch gate inside the native shadow object:
+    // index 0 -> +0x0C, index 1 -> +0x10, index 2 -> +0x14.
+    constexpr size_t kShadowCascadeEnabledBase              = 0x0C;
+    constexpr size_t kShadowCascadeEnabledStride            = 0x04;
+
+    // Native caster callback 0x007BBC50 indexes one 0x24-byte state
+    // record per legal native cascade.  Its entry fast-path is taken
+    // only when these three fields are all zero.
+    constexpr uintptr_t kShadowCasterStateBase              = 0x00D25320;
+    constexpr size_t    kShadowCasterStateStride            = 0x24;
+    constexpr size_t    kShadowCasterWorkField0             = 0x00;
+    constexpr size_t    kShadowCasterWorkField10            = 0x10;
+    constexpr size_t    kShadowCasterWorkField1C            = 0x1C;
+
     // Native texture-handle metadata written by 0x004B8C80.
     //
     // kTexResolve returns the engine Gx texture representation stored by the
@@ -862,6 +887,10 @@ namespace wxl::offsets::game::adt
     constexpr size_t kTextureHandleHeight                   = 0x4E;
     constexpr size_t kTextureHandleCreateArg5               = 0x50;
     constexpr size_t kTextureHandleCreateArg6               = 0x54;
+    // Historical symbol name retained for source stability.
+    // Static authority proves +0x58 stores the creator's transformed
+    // argument-7 value.  The accepted Tier-5 runtime value is 0x281;
+    // do not infer broader/public flag semantics from that value alone.
     constexpr size_t kTextureHandleCreateFlags              = 0x58;
 
     // Engine-managed texture-handle creation used directly by the stock
@@ -876,14 +905,14 @@ namespace wxl::offsets::game::adt
     //   arg4  = 0
     //   arg5  = native texture-format/class value
     //   arg6  = native texture-format/class value
-    //   arg7  = native creation flags
+    //   arg7  = native creator argument 7
     //   arg8  = 0
     //   arg9  = 0x005EEB70
     //   arg10 = 0x009F0E58
     //   arg11 = 0
     //
     // R5B2-A9 live proof establishes 2048x2048, arg5=arg6=0x0C,
-    // flags=0x281 on the accepted Tier-5 runtime.  B1 copies those
+    // stored +0x58 value=0x281 on the accepted Tier-5 runtime. B1 copies those
     // variable values from a live native cascade instead of hard-coding
     // them, while preserving the exact remaining native call contract.
     constexpr uintptr_t kCreateTextureHandle                = 0x004B8C80;
@@ -911,6 +940,19 @@ namespace wxl::offsets::game::adt
     constexpr size_t kShadowStateField                      = 0x0A88;
 
     using RenderShadowCascadesFn = void(__cdecl*)(void* shadowObject);
+
+    // Exact five-argument callback contract recovered from 0x874FB0.
+    //
+    // This type is valid only for legal native indices 0..2.  R5 must
+    // never invoke it with native index 3.
+    // Both recovered native return paths set EAX=1 before returning.
+    using ShadowCascadeRenderCallbackFn =
+        int32_t(__cdecl*)(
+            void* shadowObject,
+            int32_t cascadeIndex,
+            void* renderTexture,
+            void* destinationTexture,
+            void* recordArgument);
 
     // Texture layers, alpha maps and terrain shadow maps (render-chunk side)
     /// Teardown counterpart of the layer build -- release any extension-side per-layer resource exactly

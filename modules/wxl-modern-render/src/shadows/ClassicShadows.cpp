@@ -36,6 +36,7 @@ namespace wxl::scripts::render_modern::shadows
             void* resource = nullptr;
             void* gxObject = nullptr;
             bool allocationAttempted = false;
+            bool casterProofReturned = false;
 
             // Exact launch-Classic fourth-band half extent established
             // by R5A12.  Matrix/caster use comes in later B2 tranches.
@@ -53,6 +54,32 @@ namespace wxl::scripts::render_modern::shadows
                 const DWORD count =
                     GetEnvironmentVariableA(
                         "WXL_CLASSIC_SHADOWS",
+                        raw,
+                        sizeof(raw));
+
+                if (count == 0 || count >= sizeof(raw))
+                    return false;
+
+                const char c = raw[0];
+
+                return
+                    c != '0' &&
+                    c != 'n' && c != 'N' &&
+                    c != 'f' && c != 'F';
+            }();
+
+            return enabled;
+        }
+
+        bool ClassicShadowCasterProofEnabled()
+        {
+            static const bool enabled = []()
+            {
+                char raw[16] = {};
+
+                const DWORD count =
+                    GetEnvironmentVariableA(
+                        "WXL_CLASSIC_SHADOW_CASTER_PROOF",
                         raw,
                         sizeof(raw));
 
@@ -262,6 +289,7 @@ namespace wxl::scripts::render_modern::shadows
 
             g_classicCascade4.resource = nullptr;
             g_classicCascade4.gxObject = nullptr;
+            g_classicCascade4.casterProofReturned = false;
 
             // A later valid Tier-5 frame may recreate the sidecar.
             g_classicCascade4.allocationAttempted = false;
@@ -547,6 +575,259 @@ namespace wxl::scripts::render_modern::shadows
                 contractMatch ? 1u : 0u);
         }
 
+        void TryCascade2CasterIntoSidecarProof(
+            void* shadowObject)
+        {
+            static bool attempted = false;
+
+            if (
+                !ClassicShadowCasterProofEnabled() ||
+                attempted ||
+                !shadowObject ||
+                !g_classicCascade4.resource ||
+                !g_classicCascade4.gxObject)
+            {
+                return;
+            }
+
+            const std::int32_t quality =
+                *reinterpret_cast<const std::int32_t*>(
+                    adt::kEffectiveShadowQuality);
+
+            const std::int32_t mapDimension =
+                *reinterpret_cast<const std::int32_t*>(
+                    adt::kShadowMapDimension);
+
+            if (
+                quality != 5 ||
+                mapDimension != 2048)
+            {
+                return;
+            }
+
+            const auto* const bytes =
+                static_cast<const std::uint8_t*>(
+                    shadowObject);
+
+            const std::int32_t activeIndex =
+                *reinterpret_cast<const std::int32_t*>(
+                    bytes +
+                    adt::kShadowActiveCascadeIndex);
+
+            if (activeIndex < 2)
+                return;
+
+            const std::int32_t cascade2Enabled =
+                *reinterpret_cast<const std::int32_t*>(
+                    bytes +
+                    adt::kShadowCascadeEnabledBase +
+                    2 * adt::kShadowCascadeEnabledStride);
+
+            if (!cascade2Enabled)
+                return;
+
+            const uintptr_t nativeRecord =
+                adt::kShadowTextureRecordBase +
+                2 * adt::kShadowTextureRecordStride;
+
+            const float nativeExtent =
+                *reinterpret_cast<const float*>(
+                    nativeRecord +
+                    adt::kShadowCascadeExtent);
+
+            // This tranche deliberately duplicates the already-valid Wrath
+            // cascade-2 matrix.  It is NOT yet the Classic 540 matrix.
+            if (nativeExtent != 640.0f)
+            {
+                attempted = true;
+
+                WLOG_WARN(
+                    "wxl-modern-r5b2d1: caster proof refused "
+                    "native cascade2 extent=%.9g expected=640",
+                    static_cast<double>(nativeExtent));
+
+                return;
+            }
+
+            const auto callback =
+                reinterpret_cast<
+                    adt::ShadowCascadeRenderCallbackFn>(
+                    *reinterpret_cast<void* const*>(
+                        adt::kShadowRenderCallbackPtr));
+
+            if (
+                !callback ||
+                reinterpret_cast<uintptr_t>(callback) !=
+                    adt::kShadowCascadeRenderCallback)
+            {
+                attempted = true;
+
+                WLOG_WARN(
+                    "wxl-modern-r5b2d1: caster proof refused "
+                    "callback=%p expected=0x%08X",
+                    reinterpret_cast<void*>(callback),
+                    static_cast<unsigned>(
+                        adt::kShadowCascadeRenderCallback));
+
+                return;
+            }
+
+            const auto resolve =
+                reinterpret_cast<adt::Map_TexResolveFn>(
+                    adt::kTexResolve);
+
+            if (!resolve)
+            {
+                attempted = true;
+
+                WLOG_WARN(
+                    "wxl-modern-r5b2d1: caster proof refused "
+                    "texture resolver unavailable");
+
+                return;
+            }
+
+            const std::int32_t shadowGroup =
+                *reinterpret_cast<const std::int32_t*>(
+                    adt::kShadowGroup);
+
+            void* renderTexture = nullptr;
+            void* destinationTexture = nullptr;
+
+            if (shadowGroup != 0)
+            {
+                void* const sharedHandle =
+                    *reinterpret_cast<void* const*>(
+                        adt::kShadowCasterSharedResource);
+
+                if (!sharedHandle)
+                {
+                    attempted = true;
+
+                    WLOG_WARN(
+                        "wxl-modern-r5b2d1: caster proof refused "
+                        "shared caster resource is null");
+
+                    return;
+                }
+
+                renderTexture =
+                    resolve(
+                        sharedHandle,
+                        1,
+                        0);
+
+                destinationTexture =
+                    g_classicCascade4.gxObject;
+            }
+            else
+            {
+                renderTexture =
+                    g_classicCascade4.gxObject;
+
+                destinationTexture = nullptr;
+            }
+
+            if (!renderTexture)
+            {
+                attempted = true;
+
+                WLOG_WARN(
+                    "wxl-modern-r5b2d1: caster proof refused "
+                    "resolved render texture is null "
+                    "shadowGroup=%d",
+                    static_cast<int>(shadowGroup));
+
+                return;
+            }
+
+            void* const recordArgument =
+                reinterpret_cast<void*>(
+                    nativeRecord +
+                    adt::kShadowCasterRecordArgument);
+
+            const uintptr_t casterState =
+                adt::kShadowCasterStateBase +
+                2 * adt::kShadowCasterStateStride;
+
+            const std::uint32_t work0 =
+                *reinterpret_cast<const std::uint32_t*>(
+                    casterState +
+                    adt::kShadowCasterWorkField0);
+
+            const std::uint32_t work10 =
+                *reinterpret_cast<const std::uint32_t*>(
+                    casterState +
+                    adt::kShadowCasterWorkField10);
+
+            const std::uint32_t work1C =
+                *reinterpret_cast<const std::uint32_t*>(
+                    casterState +
+                    adt::kShadowCasterWorkField1C);
+
+            const bool fullCasterPathExpected =
+                work0 != 0 ||
+                work10 != 0 ||
+                work1C != 0;
+
+            attempted = true;
+
+            WLOG_INFO(
+                "wxl-modern-r5b2d1: caster proof invoke "
+                "object=%p legalIndex=2 "
+                "renderTexture=%p destinationTexture=%p "
+                "recordArgument=%p shadowGroup=%d "
+                "matrixSource=native-cascade2 "
+                "matrixExtent=640 sidecarTargetExtent=540 "
+                "workState=%08X/%08X/%08X "
+                "expectedPath=%s receiverBound=0",
+                shadowObject,
+                renderTexture,
+                destinationTexture,
+                recordArgument,
+                static_cast<int>(shadowGroup),
+                static_cast<unsigned>(work0),
+                static_cast<unsigned>(work10),
+                static_cast<unsigned>(work1C),
+                fullCasterPathExpected
+                    ? "full-caster"
+                    : "fast-transfer");
+
+            const std::int32_t callbackResult =
+                callback(
+                    shadowObject,
+                    2,
+                    renderTexture,
+                    destinationTexture,
+                    recordArgument);
+
+            g_classicCascade4.casterProofReturned =
+                callbackResult == 1;
+
+            if (callbackResult != 1)
+            {
+                WLOG_WARN(
+                    "wxl-modern-r5b2d1: caster proof "
+                    "unexpected callback result=%d",
+                    static_cast<int>(callbackResult));
+            }
+
+            WLOG_INFO(
+                "wxl-modern-r5b2d1: caster proof returned "
+                "legalIndex=2 sidecar=%p gx=%p "
+                "callbackResult=%d expectedPath=%s "
+                "casterProof=%u receiverBound=0",
+                g_classicCascade4.resource,
+                g_classicCascade4.gxObject,
+                static_cast<int>(callbackResult),
+                fullCasterPathExpected
+                    ? "full-caster"
+                    : "fast-transfer",
+                g_classicCascade4.casterProofReturned
+                    ? 1u
+                    : 0u);
+        }
+
         void __cdecl hkRenderShadowCascades(void* shadowObject)
         {
             if (g_origRenderShadowCascades)
@@ -571,6 +852,15 @@ namespace wxl::scripts::render_modern::shadows
             // Tier-5 contract.  It is deliberately not bound, rendered into,
             // or exposed to a receiver yet.
             EnsureClassicCascade4Resource();
+
+            // R5B2-D1: opt-in, one-shot target-path proof.  Re-render the
+            // already-valid native cascade #2 through the exact native caster
+            // callback, but direct its per-cascade destination to the
+            // extension-owned sidecar.  Legal native index 2 only.
+            //
+            // There is still no fourth matrix and no receiver binding.
+            TryCascade2CasterIntoSidecarProof(
+                shadowObject);
 
             static unsigned logged = 0;
 
@@ -678,6 +968,7 @@ namespace wxl::scripts::render_modern::shadows
             g_classicCascade4.resource = nullptr;
             g_classicCascade4.gxObject = nullptr;
             g_classicCascade4.allocationAttempted = false;
+            g_classicCascade4.casterProofReturned = false;
 
             WLOG_INFO(
                 "wxl-modern-r5b2b1: cascade4 sidecar "
