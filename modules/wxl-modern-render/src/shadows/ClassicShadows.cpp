@@ -44,6 +44,14 @@ namespace wxl::scripts::render_modern::shadows
 
         bool g_classicGeometryBuildHookInstalled = false;
 
+        adt::BindTerrainShadowMapFn
+            g_origBindTerrainShadowMap = nullptr;
+
+        adt::BindTerrainShadowMapFn
+            g_origBindTerrainShadowMapAlt = nullptr;
+
+        bool g_classicReceiverHooksInstalled = false;
+
         struct ClassicCascade4Sidecar
         {
             void* resource = nullptr;
@@ -203,6 +211,32 @@ namespace wxl::scripts::render_modern::shadows
                 const DWORD count =
                     GetEnvironmentVariableA(
                         "WXL_CLASSIC_SHADOW_GEOMETRY_PROOF",
+                        raw,
+                        sizeof(raw));
+
+                if (count == 0 || count >= sizeof(raw))
+                    return false;
+
+                const char c = raw[0];
+
+                return
+                    c != '0' &&
+                    c != 'n' && c != 'N' &&
+                    c != 'f' && c != 'F';
+            }();
+
+            return enabled;
+        }
+
+        bool ClassicShadowReceiverBindProofEnabled()
+        {
+            static const bool enabled = []()
+            {
+                char raw[16] = {};
+
+                const DWORD count =
+                    GetEnvironmentVariableA(
+                        "WXL_CLASSIC_SHADOW_RECEIVER_BIND_PROOF",
                         raw,
                         sizeof(raw));
 
@@ -3039,6 +3073,129 @@ namespace wxl::scripts::render_modern::shadows
                     : 0u);
         }
 
+        void BindClassicCascade4ReceiverTexture(
+            std::int32_t gxTextureState,
+            const char* pathName,
+            unsigned& logCounter)
+        {
+            if (
+                !ClassicShadowReceiverBindProofEnabled() ||
+                !g_classicReceiverHooksInstalled ||
+                !g_classicCascade4.resource ||
+                !g_classicCascade4.gxObject ||
+                !g_classicCascade4.matrixValid)
+            {
+                return;
+            }
+
+            const std::int32_t quality =
+                *reinterpret_cast<const std::int32_t*>(
+                    adt::kEffectiveShadowQuality);
+
+            const std::int32_t mapDimension =
+                *reinterpret_cast<const std::int32_t*>(
+                    adt::kShadowMapDimension);
+
+            if (
+                quality != 5 ||
+                mapDimension != 2048)
+            {
+                return;
+            }
+
+            void* const gxDevice =
+                *reinterpret_cast<void* const*>(
+                    adt::kGxDeviceSingleton);
+
+            const auto setTexture =
+                reinterpret_cast<
+                    adt::Map_SamplerBindFn>(
+                    adt::kSetSamplerTexture);
+
+            if (
+                !gxDevice ||
+                !setTexture)
+            {
+                if (logCounter < 4)
+                {
+                    ++logCounter;
+
+                    WLOG_WARN(
+                        "wxl-modern-r5b2g3a: receiver bind refused "
+                        "path=%s state=0x%02X "
+                        "gxDevice=%p setTexture=%p",
+                        pathName ? pathName : "unknown",
+                        static_cast<unsigned>(
+                            gxTextureState),
+                        gxDevice,
+                        reinterpret_cast<void*>(
+                            setTexture));
+                }
+
+                return;
+            }
+
+            setTexture(
+                gxDevice,
+                nullptr,
+                gxTextureState,
+                g_classicCascade4.gxObject);
+
+            if (logCounter < 4)
+            {
+                ++logCounter;
+
+                const int sampler =
+                    static_cast<int>(
+                        gxTextureState -
+                        adt::kGxStateTexture0);
+
+                WLOG_INFO(
+                    "wxl-modern-r5b2g3a: receiver sidecar bound "
+                    "path=%s "
+                    "state=0x%02X sampler=t%d "
+                    "gx=%p matrixValid=%u "
+                    "geometryFrames=%llu "
+                    "extent=540 shaderConsumesFourth=0",
+                    pathName ? pathName : "unknown",
+                    static_cast<unsigned>(
+                        gxTextureState),
+                    sampler,
+                    g_classicCascade4.gxObject,
+                    g_classicCascade4.matrixValid
+                        ? 1u
+                        : 0u,
+                    static_cast<unsigned long long>(
+                        g_classicCascade4.geometryFrames));
+            }
+        }
+
+        void __cdecl hkBindTerrainShadowMap()
+        {
+            if (g_origBindTerrainShadowMap)
+                g_origBindTerrainShadowMap();
+
+            static unsigned logged = 0;
+
+            BindClassicCascade4ReceiverTexture(
+                adt::kClassicCascade4StatePathA,
+                "A",
+                logged);
+        }
+
+        void __cdecl hkBindTerrainShadowMapAlt()
+        {
+            if (g_origBindTerrainShadowMapAlt)
+                g_origBindTerrainShadowMapAlt();
+
+            static unsigned logged = 0;
+
+            BindClassicCascade4ReceiverTexture(
+                adt::kClassicCascade4StatePathB,
+                "B",
+                logged);
+        }
+
         void __cdecl hkBuildShadowCascades(
             void* shadowObject,
             void* context,
@@ -3208,7 +3365,29 @@ namespace wxl::scripts::render_modern::shadows
                 buildInstalled &&
                 renderInstalled;
 
-            if (g_classicGeometryBuildHookInstalled)
+            const bool receiverAInstalled =
+                g_classicGeometryBuildHookInstalled &&
+                wxl::hook::Install(
+                    "R5ClassicTerrainShadowBindA",
+                    adt::kBindTerrainShadowMap,
+                    &hkBindTerrainShadowMap,
+                    &g_origBindTerrainShadowMap);
+
+            const bool receiverBInstalled =
+                receiverAInstalled &&
+                wxl::hook::Install(
+                    "R5ClassicTerrainShadowBindB",
+                    adt::kBindTerrainShadowMapAlt,
+                    &hkBindTerrainShadowMapAlt,
+                    &g_origBindTerrainShadowMapAlt);
+
+            g_classicReceiverHooksInstalled =
+                receiverAInstalled &&
+                receiverBInstalled;
+
+            if (
+                g_classicGeometryBuildHookInstalled &&
+                g_classicReceiverHooksInstalled)
             {
                 WLOG_INFO(
                     "wxl-modern-r5b2g2r1: Classic shadow build/render "
@@ -3222,20 +3401,38 @@ namespace wxl::scripts::render_modern::shadows
                         adt::kRenderShadowCascades),
                     static_cast<unsigned>(
                         adt::kShadowCascadeRenderCallback));
+
+                WLOG_INFO(
+                    "wxl-modern-r5b2g3a: receiver hooks installed "
+                    "pathA=0x%08X fourthStateA=0x%02X samplerA=t9 "
+                    "pathB=0x%08X fourthStateB=0x%02X samplerB=t8 "
+                    "shaderConsumesFourth=0",
+                    static_cast<unsigned>(
+                        adt::kBindTerrainShadowMap),
+                    static_cast<unsigned>(
+                        adt::kClassicCascade4StatePathA),
+                    static_cast<unsigned>(
+                        adt::kBindTerrainShadowMapAlt),
+                    static_cast<unsigned>(
+                        adt::kClassicCascade4StatePathB));
             }
             else
             {
                 WLOG_WARN(
-                    "wxl-modern-r5b2g2r1: Classic shadow hook install "
-                    "incomplete buildInstalled=%u "
-                    "renderInstalled=%u geometryEnabled=0",
+                    "wxl-modern-r5b2g3a: Classic shadow hook install "
+                    "incomplete build=%u render=%u "
+                    "receiverA=%u receiverB=%u",
                     buildInstalled ? 1u : 0u,
-                    renderInstalled ? 1u : 0u);
+                    renderInstalled ? 1u : 0u,
+                    receiverAInstalled ? 1u : 0u,
+                    receiverBInstalled ? 1u : 0u);
             }
 
             return
                 buildInstalled &&
-                renderInstalled;
+                renderInstalled &&
+                receiverAInstalled &&
+                receiverBInstalled;
         }
     }
 

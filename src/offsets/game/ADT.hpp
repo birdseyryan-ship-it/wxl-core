@@ -795,6 +795,46 @@ namespace wxl::offsets::game::adt
     /// hook for a custom terrain shadowing scheme. __cdecl, caller-cleaned.
     constexpr uintptr_t kBindTerrainShadowMap              = 0x00874660;
 
+    // R5B2-G3A receiver-path authority.
+    //
+    // Wrath exposes two no-argument terrain shadow binding layouts:
+    //
+    //   0x874660:
+    //     state 0x1A -> sampler t5 auxiliary
+    //     state 0x1B -> sampler t6 cascade 0
+    //     state 0x1C -> sampler t7 cascade 1
+    //     state 0x1D -> sampler t8 cascade 2
+    //     therefore 0x1E -> free sampler t9 for cascade 3.
+    //
+    //   0x874760:
+    //     state 0x19 -> sampler t4 auxiliary
+    //     state 0x1A -> sampler t5 cascade 0
+    //     state 0x1B -> sampler t6 cascade 1
+    //     state 0x1C -> sampler t7 cascade 2
+    //     therefore 0x1D -> free sampler t8 for cascade 3.
+    //
+    // 0x685F50 receives the graphics context in ECX and two stack
+    // arguments: Gx texture state and resolved engine Gx texture.
+    // Its texture-state base is 0x15 (GxStateTexture0).
+    constexpr uintptr_t kBindTerrainShadowMapAlt           = 0x00874760;
+
+    // Reuse the canonical terrain-render authorities declared above:
+    //
+    //   kGxDeviceSingleton = 0x00C5DF88
+    //   kSetSamplerTexture  = 0x00685F50
+    //   Map_SamplerBindFn   = exact fastcall wrapper
+    //
+    // Do not duplicate those symbols in the shadow section.
+    constexpr int32_t kGxStateTexture0                     = 0x15;
+    constexpr int32_t kClassicCascade4StatePathA           = 0x1E;
+    constexpr int32_t kClassicCascade4StatePathB           = 0x1D;
+
+    using BindTerrainShadowMapFn =
+        void(__cdecl*)();
+
+    // kSetSamplerTexture uses the canonical Map_SamplerBindFn type
+    // declared in the terrain-render authority block above.
+
     // --- projected dynamic-shadow cascade pipeline -----------------------------------------
     // R5 Classic-shadow backport authority:
     //
