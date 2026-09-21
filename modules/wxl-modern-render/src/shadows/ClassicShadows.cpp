@@ -4057,6 +4057,39 @@ namespace wxl::scripts::render_modern::shadows
                 FAILED(hr) ||
                 !codeBlob)
             {
+                // Bounded R3 diagnostic: expose the actual source handed
+                // to D3DAssemble. Log once only; no rendering behaviour
+                // changes and stock fallback remains unchanged.
+                static bool receiverAsmDiagnosticLogged = false;
+
+                if (!receiverAsmDiagnosticLogged)
+                {
+                    receiverAsmDiagnosticLogged = true;
+
+                    const std::vector<ShaderLine> diagnosticLines =
+                        SplitShaderLines(
+                            patched);
+
+                    const std::size_t diagnosticCount =
+                        diagnosticLines.size() < 20
+                            ? diagnosticLines.size()
+                            : 20;
+
+                    for (
+                        std::size_t diagnosticLine = 0;
+                        diagnosticLine < diagnosticCount;
+                        ++diagnosticLine)
+                    {
+                        WLOG_WARN(
+                            "wxl-modern-r5b2g3b-diag: "
+                            "asm-input line %u: [%s]",
+                            static_cast<unsigned>(
+                                diagnosticLine + 1),
+                            diagnosticLines[
+                                diagnosticLine].text.c_str());
+                    }
+                }
+
                 WLOG_WARN(
                     "wxl-modern-r5b2g3b: "
                     "receiver reassemble failed: %s",
