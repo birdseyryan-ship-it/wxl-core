@@ -4118,6 +4118,27 @@ namespace wxl::scripts::render_modern::shadows
                         }
                     }
 
+                    // D3DDisassemble exposes the legacy specular-color
+                    // input semantic as "specular0". D3D shader assembly
+                    // represents that value as COLOR usage index 1.
+                    //
+                    //     dcl_specular0 vN
+                    //       ->
+                    //     dcl_color1 vN
+                    //
+                    // Rewrite only this exact declaration alias.
+                    if (
+                        assemblyLine.compare(
+                            0,
+                            14,
+                            "dcl_specular0 ") == 0)
+                    {
+                        assemblyLine.replace(
+                            0,
+                            14,
+                            "dcl_color1 ");
+                    }
+
                     normalized += assemblyLine;
                     normalized += '\n';
                 }
