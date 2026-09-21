@@ -3972,7 +3972,7 @@ namespace wxl::scripts::render_modern::shadows
                     disassemble(
                         bytecode,
                         length,
-                        0,
+                        D3D_DISASM_INSTRUCTION_ONLY,
                         nullptr,
                         &textBlob)) ||
                 !textBlob)
