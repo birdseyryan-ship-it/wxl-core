@@ -815,6 +815,22 @@ namespace wxl::offsets::game::adt
     constexpr uintptr_t kShadowMapDimension                 = 0x00D43150;
     constexpr uintptr_t kEffectiveShadowQuality             = 0x00D43154;
 
+    // Native per-cascade shadow texture records. R5A13 proved three records,
+    // each 0x3C bytes. Terrain binding selects a texture handle from the first
+    // dwords of each record using the active slot stored at record + 0x38.
+    //
+    // Record bases:
+    //   cascade 0 -> 0x00D43290
+    //   cascade 1 -> 0x00D432CC
+    //   cascade 2 -> 0x00D43308
+    //
+    // A hypothetical native record 3 would begin at 0x00D43344 and collide
+    // with the live receiver constant block at 0x00D43348; never extend this.
+    constexpr uintptr_t kShadowTextureRecordBase            = 0x00D43290;
+    constexpr size_t    kShadowTextureRecordStride          = 0x003C;
+    constexpr size_t    kShadowTextureActiveSlot            = 0x0038;
+    constexpr size_t    kShadowTextureSelectableSlots       = 4;
+
     // Native shadow-object layout proven by R5A13.
     constexpr size_t kShadowCascadeRecordBase               = 0x06C;
     constexpr size_t kShadowCascadeRecordStride             = 0x0F4;
