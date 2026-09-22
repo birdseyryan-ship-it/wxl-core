@@ -290,6 +290,32 @@ namespace wxl::scripts::render_modern::shadows
             return enabled;
         }
 
+        bool ClassicShadowSidecar180TexelRecenterDiagnosticEnabled()
+        {
+            static const bool enabled = []()
+            {
+                char raw[16] = {};
+
+                const DWORD count =
+                    GetEnvironmentVariableA(
+                        "WXL_CLASSIC_SHADOW_SIDECAR180_TEXEL_RECENTER_DIAG",
+                        raw,
+                        sizeof(raw));
+
+                if (count == 0 || count >= sizeof(raw))
+                    return false;
+
+                const char c = raw[0];
+
+                return
+                    c != '0' &&
+                    c != 'n' && c != 'N' &&
+                    c != 'f' && c != 'F';
+            }();
+
+            return enabled;
+        }
+
         bool ClassicShadowReceiverBindProofEnabled()
         {
             static const bool enabled = []()
@@ -1701,6 +1727,60 @@ namespace wxl::scripts::render_modern::shadows
                 reinterpret_cast<const void*>(
                     casterState),
                 sizeof(casterStateSnapshot));
+
+            const bool coherentSidecar180Builder =
+                ClassicShadowSidecar180TexelRecenterDiagnosticEnabled() &&
+                targetExtent == 180.0f;
+
+            if (coherentSidecar180Builder)
+            {
+                // Classic 180:
+                //
+                // full width       = 360
+                // map dimension    = 2048
+                // world texel      = 360 / 2048
+                //                  = 0.17578125
+                // world texel^2    = 0.0308990478515625
+                //
+                // The broad 640 record remains the authority for caster
+                // candidate coverage. These two fields are changed only
+                // while the projection matrix builder runs, then the
+                // exact broad record is restored before the caster.
+                constexpr float classic180WorldTexel =
+                    0.17578125f;
+
+                constexpr float classic180WorldTexelSq =
+                    0.0308990478515625f;
+
+                *reinterpret_cast<float*>(
+                    nativeRecord +
+                    adt::kShadowCascadeExtent) =
+                        180.0f;
+
+                *reinterpret_cast<float*>(
+                    nativeRecord +
+                    adt::kShadowCascadeRecenterSq) =
+                        classic180WorldTexelSq;
+
+                static bool loggedCoherent180Builder = false;
+
+                if (!loggedCoherent180Builder)
+                {
+                    loggedCoherent180Builder = true;
+
+                    WLOG_INFO(
+                        "wxl-modern-r5g3c-diag4: "
+                        "sidecar180 builder coherence "
+                        "extent=180 "
+                        "worldTexel=%.9g "
+                        "recenterSq=%.9g "
+                        "broad640RestoredBeforeCaster=1",
+                        static_cast<double>(
+                            classic180WorldTexel),
+                        static_cast<double>(
+                            classic180WorldTexelSq));
+                }
+            }
 
             builder(
                 cloneRecord,
