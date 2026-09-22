@@ -3780,6 +3780,44 @@ namespace wxl::scripts::render_modern::shadows
                 return std::string();
             }
 
+            char finalDestinationRaw[32] = {};
+            char nativeFadeRaw[32] = {};
+            char nativeShadowDeltaRaw[32] = {};
+            char nativeLitRaw[32] = {};
+
+            const int finalMadFields =
+                std::sscanf(
+                    lines[resultLine].text.c_str(),
+                    "mad %31[^,], %31[^,], %31[^,], %31s",
+                    finalDestinationRaw,
+                    nativeFadeRaw,
+                    nativeShadowDeltaRaw,
+                    nativeLitRaw);
+
+            const std::string finalDestination =
+                finalDestinationRaw;
+
+            const std::string nativeFade =
+                nativeFadeRaw;
+
+            const std::string nativeShadowDelta =
+                nativeShadowDeltaRaw;
+
+            const std::string nativeLit =
+                nativeLitRaw;
+
+            if (
+                finalMadFields != 4 ||
+                finalDestination != result ||
+                nativeFade.empty() ||
+                nativeFade[0] != 'r' ||
+                nativeShadowDelta.empty() ||
+                nativeShadowDelta[0] != 'r' ||
+                nativeLit != "c0.w")
+            {
+                return std::string();
+            }
+
             const std::size_t dclAt =
                 AfterLastShaderDeclaration(
                     text);
@@ -3890,28 +3928,21 @@ namespace wxl::scripts::render_modern::shadows
                 T2, T5, T2);
             injected += line;
 
-            std::snprintf(
-                line,
-                sizeof(line),
-                "    abs r%d.x, %s.w\n"
-                "    abs r%d.y, %s.w\n"
-                "    max r%d.z, r%d.x, r%d.y\n"
-                "    mad_sat r%d.z, r%d.z, c35.z, c35.w\n"
-                "    add r%d.z, c34.z, -r%d.z\n",
-                T5, tc4.c_str(),
-                T5, tc5.c_str(),
-                T5, T5, T5,
-                T5, T5,
-                T5, T5);
-            injected += line;
+            // The native outer receiver already computed the exact
+            // slot-2 edge fade. Do not reconstruct it from projected
+            // coordinates; consume that proven live coefficient below.
 
             std::snprintf(
                 line,
                 sizeof(line),
-                "    add r%d.x, r%d.y, -%s\n"
-                "    mad %s, r%d.z, r%d.x, %s\n",
-                T6, T2, result.c_str(),
-                result.c_str(), T5, T6, result.c_str());
+                "    add r%d.x, %s, c34.z\n"
+                "    add r%d.x, r%d.x, -r%d.y\n"
+                "    mad %s, %s, r%d.x, r%d.y\n",
+                T6, nativeShadowDelta.c_str(),
+                T6, T6, T2,
+                result.c_str(),
+                nativeFade.c_str(),
+                T6, T2);
             injected += line;
 
             const std::string declarations =
@@ -4673,11 +4704,12 @@ namespace wxl::scripts::render_modern::shadows
 
             // c35:
             //   xy = Classic final-cascade fade 0.70 -> 0.99
-            //   zw = stock Wrath 180-edge transition 0.90 -> 0.99
+            //   zw = unused; the 180 -> 540 handoff now consumes the
+            //        exact native outer-cascade fade operand directly.
             constants[4][0] = -3.44827586f;
             constants[4][1] =  3.41379310f;
-            constants[4][2] = -11.1111111f;
-            constants[4][3] =  11.0f;
+            constants[4][2] =  0.0f;
+            constants[4][3] =  0.0f;
 
             reinterpret_cast<
                 shoff::ShaderConstantsSetHelperFn>(
