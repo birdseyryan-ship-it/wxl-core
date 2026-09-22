@@ -3933,12 +3933,14 @@ namespace wxl::scripts::render_modern::shadows
             const int T3 = maxTemp + 4;
             const int T4 = maxTemp + 5;
             const int T5 = maxTemp + 6;
+            const int T6 = maxTemp + 7;
 
             char line[256] = {};
-            std::string injected;
 
-            // Compute extension-owned 180 projection directly from the
-            // terrain world position supplied in TEXCOORD3.
+            std::string preNative;
+            std::string postNative;
+
+            // Sample the extension-owned 180 band first.
             std::snprintf(
                 line,
                 sizeof(line),
@@ -3946,7 +3948,7 @@ namespace wxl::scripts::render_modern::shadows
                 "    mov r%d.w, c34.z\n",
                 T0,
                 T0);
-            injected += line;
+            preNative += line;
 
             for (int axis = 0; axis < 3; ++axis)
             {
@@ -3958,25 +3960,24 @@ namespace wxl::scripts::render_modern::shadows
                     "xyz"[axis],
                     T0,
                     31 + axis);
-                injected += line;
+                preNative += line;
             }
 
-            // Nested selection. We are already inside the stock final
-            // ELSE, so the near native branches have failed. Use 180
-            // while it contains the receiver; otherwise fall through
-            // untouched to the original native s8 / 540 branch.
+            // Smooth 180 -> 540 transition:
+            // <= 0.90 footprint => 180
+            // >= 0.99 footprint => native 540
             std::snprintf(
                 line,
                 sizeof(line),
                 "    abs r%d.x, r%d.x\n"
                 "    abs r%d.y, r%d.y\n"
                 "    max r%d.x, r%d.x, r%d.y\n"
-                "    if_lt r%d.x, c34.z\n",
+                "    mad_sat r%d.z, r%d.x, c35.z, c35.w\n",
                 T5, T1,
                 T5, T1,
                 T5, T5, T5,
-                T5);
-            injected += line;
+                T5, T5);
+            preNative += line;
 
             std::snprintf(
                 line,
@@ -3987,11 +3988,9 @@ namespace wxl::scripts::render_modern::shadows
                 T1, T1,
                 T1, T1,
                 T1);
-            injected += line;
+            preNative += line;
 
-            // Five comparison samples, matching the established Wrath
-            // Terrain3_pcf receiver footprint. All maps remain 2048^2,
-            // so the existing one-texel offset constants remain valid.
+            // Five comparison samples from sidecar 180.
             std::snprintf(
                 line,
                 sizeof(line),
@@ -4005,7 +4004,7 @@ namespace wxl::scripts::render_modern::shadows
                 T3, T1,
                 T4, T3,
                 T2, T2, T4);
-            injected += line;
+            preNative += line;
 
             const int offsetConstants[3] =
                 {5, 7, 9};
@@ -4021,20 +4020,34 @@ namespace wxl::scripts::render_modern::shadows
                     T3, T1, offset,
                     T4, T3,
                     T2, T2, T4);
-                injected += line;
+                preNative += line;
             }
 
-            // c34.y = 1/5. The intermediate 180 band is not the final
-            // cascade, so do not fade it toward white. Classic authority
-            // showed nested selection and no proven inter-cascade blend.
             std::snprintf(
                 line,
                 sizeof(line),
-                "    mul %s, r%d.x, c34.y\n"
-                "    else\n",
-                result.c_str(),
+                "    mul r%d.y, r%d.x, c34.y\n",
+                T2,
                 T2);
-            injected += line;
+            preNative += line;
+
+            // Stock native 540 branch executes unchanged between these
+            // two injected blocks.
+            //
+            // Then:
+            // result = native540 +
+            //          weight * (sidecar180 - native540)
+            std::snprintf(
+                line,
+                sizeof(line),
+                "    add r%d.x, r%d.y, -%s\n"
+                "    mad %s, r%d.z, r%d.x, %s\n",
+                T6, T2, result.c_str(),
+                result.c_str(),
+                T5,
+                T6,
+                result.c_str());
+            postNative += line;
 
             const std::string declarations =
                 "    dcl_texcoord3 v9\n"
@@ -4042,25 +4055,23 @@ namespace wxl::scripts::render_modern::shadows
 
             std::string output = text;
 
-            const std::size_t branchInjectAt =
+            const std::size_t preNativeInjectAt =
                 lines[finalElse].end;
 
-            const std::size_t closeInjectAt =
+            const std::size_t postNativeInjectAt =
                 lines[finalEndif].begin;
 
             if (
-                dclAt < branchInjectAt &&
-                branchInjectAt < closeInjectAt)
+                dclAt < preNativeInjectAt &&
+                preNativeInjectAt < postNativeInjectAt)
             {
-                // Insert from highest original offset to lowest so all
-                // recorded positions remain valid.
                 output.insert(
-                    closeInjectAt,
-                    "    endif\n");
+                    postNativeInjectAt,
+                    postNative);
 
                 output.insert(
-                    branchInjectAt,
-                    injected);
+                    preNativeInjectAt,
+                    preNative);
 
                 output.insert(
                     dclAt,
@@ -4659,7 +4670,7 @@ namespace wxl::scripts::render_modern::shadows
                     "stock=%p bytes=%u->%u "
                     "world=TEXCOORD3 sidecar180=s9 "
                     "matrixRegs=c31-c33 "
-                    "nestedBeforeNative540=1 filter=5cmp",
+                    "blend180to540=0.90->0.99 filter=5cmp",
                     stock,
                     static_cast<unsigned>(
                         length),
@@ -4805,13 +4816,13 @@ namespace wxl::scripts::render_modern::shadows
             constants[3][3] = 0.0f;
 
             // c35:
-            //   xy = Classic final-cascade fade 0.70 -> 0.99
-            //   zw = unused; the 180 -> 540 handoff now consumes the
-            //        exact native outer-cascade fade operand directly.
+            //   xy = reserved Classic final-cascade fade 0.70 -> 0.99
+            //   zw = sidecar180 -> native540 overlap:
+            //        0.90 -> 0.99 of the 180 projection footprint.
             constants[4][0] = -3.44827586f;
             constants[4][1] =  3.41379310f;
-            constants[4][2] =  0.0f;
-            constants[4][3] =  0.0f;
+            constants[4][2] = -11.1111111f;
+            constants[4][3] =  11.0f;
 
             reinterpret_cast<
                 shoff::ShaderConstantsSetHelperFn>(
