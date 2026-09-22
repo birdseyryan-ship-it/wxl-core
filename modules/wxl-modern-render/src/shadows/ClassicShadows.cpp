@@ -4094,8 +4094,128 @@ namespace wxl::scripts::render_modern::shadows
 
             char line[256] = {};
 
+            std::string innerBlend;
             std::string preNative;
             std::string postNative;
+
+            // ---------------------------------------------------------
+            // INNER 60 -> 180 COMPATIBILITY BLEND
+            //
+            // Wrath's stock nested selector keeps s7 while TEXCOORD5
+            // remains inside its footprint, then hard-switches at the
+            // final ELSE. With Classic extents that means native60 ->
+            // sidecar180.
+            //
+            // Blend only over 0.90 -> 0.99 of the native-60 footprint.
+            // ---------------------------------------------------------
+
+            std::snprintf(
+                line,
+                sizeof(line),
+                "    mov r%d.xyz, v9\n"
+                "    mov r%d.w, c34.z\n",
+                T0,
+                T0);
+            innerBlend += line;
+
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                std::snprintf(
+                    line,
+                    sizeof(line),
+                    "    dp4 r%d.%c, r%d, c%d\n",
+                    T1,
+                    "xyz"[axis],
+                    T0,
+                    31 + axis);
+                innerBlend += line;
+            }
+
+            // Use the native 60 projected footprint (TEXCOORD5) to
+            // construct the transition.
+            //
+            // c35.zw gives:
+            //   <=0.90 -> 1
+            //   >=0.99 -> 0
+            //
+            // Invert it so the 180 contribution rises 0 -> 1.
+            std::snprintf(
+                line,
+                sizeof(line),
+                "    abs r%d.x, %s.x\n"
+                "    abs r%d.y, %s.y\n"
+                "    max r%d.z, r%d.x, r%d.y\n"
+                "    mad_sat r%d.z, r%d.z, c35.z, c35.w\n"
+                "    add r%d.z, c34.z, -r%d.z\n",
+                T5, tc5.c_str(),
+                T5, tc5.c_str(),
+                T5, T5, T5,
+                T5, T5,
+                T5, T5);
+            innerBlend += line;
+
+            // Sidecar-180 sampling coordinates.
+            std::snprintf(
+                line,
+                sizeof(line),
+                "    mad r%d.x, r%d.x, c34.x, c34.x\n"
+                "    mad r%d.y, r%d.y, c34.x, c34.x\n"
+                "    mov r%d.w, c34.w\n",
+                T1, T1,
+                T1, T1,
+                T1);
+            innerBlend += line;
+
+            // Five comparison lookups from sidecar180.
+            std::snprintf(
+                line,
+                sizeof(line),
+                "    texldl r%d, r%d, s9\n"
+                "    add r%d.xy, r%d, c3\n"
+                "    mov r%d.zw, r%d\n"
+                "    texldl r%d, r%d, s9\n"
+                "    add r%d.x, r%d.x, r%d.x\n",
+                T2, T1,
+                T3, T1,
+                T3, T1,
+                T4, T3,
+                T2, T2, T4);
+            innerBlend += line;
+
+            const int innerOffsetConstants[3] =
+                {5, 7, 9};
+
+            for (int offset : innerOffsetConstants)
+            {
+                std::snprintf(
+                    line,
+                    sizeof(line),
+                    "    add r%d.xy, r%d, c%d\n"
+                    "    texldl r%d, r%d, s9\n"
+                    "    add r%d.x, r%d.x, r%d.x\n",
+                    T3, T1, offset,
+                    T4, T3,
+                    T2, T2, T4);
+                innerBlend += line;
+            }
+
+            // Average 180 result, then:
+            //
+            // result = native60 +
+            //          innerWeight * (sidecar180 - native60)
+            std::snprintf(
+                line,
+                sizeof(line),
+                "    mul r%d.y, r%d.x, c34.y\n"
+                "    add r%d.x, r%d.y, -%s\n"
+                "    mad %s, r%d.z, r%d.x, %s\n",
+                T2, T2,
+                T6, T2, result.c_str(),
+                result.c_str(),
+                T5,
+                T6,
+                result.c_str());
+            innerBlend += line;
 
             // Sample the extension-owned 180 band first.
             std::snprintf(
@@ -4212,6 +4332,9 @@ namespace wxl::scripts::render_modern::shadows
 
             std::string output = text;
 
+            const std::size_t innerBlendInjectAt =
+                lines[finalElse].begin;
+
             const std::size_t preNativeInjectAt =
                 lines[finalElse].end;
 
@@ -4219,9 +4342,11 @@ namespace wxl::scripts::render_modern::shadows
                 lines[finalEndif].begin;
 
             if (
-                dclAt < preNativeInjectAt &&
+                dclAt < innerBlendInjectAt &&
+                innerBlendInjectAt < preNativeInjectAt &&
                 preNativeInjectAt < postNativeInjectAt)
             {
+                // Highest original offsets first.
                 output.insert(
                     postNativeInjectAt,
                     postNative);
@@ -4229,6 +4354,10 @@ namespace wxl::scripts::render_modern::shadows
                 output.insert(
                     preNativeInjectAt,
                     preNative);
+
+                output.insert(
+                    innerBlendInjectAt,
+                    innerBlend);
 
                 output.insert(
                     dclAt,
@@ -4827,7 +4956,9 @@ namespace wxl::scripts::render_modern::shadows
                     "stock=%p bytes=%u->%u "
                     "world=TEXCOORD3 sidecar180=s9 "
                     "matrixRegs=c31-c33 "
-                    "blend180to540=0.90->0.99 filter=5cmp",
+                    "blend60to180=0.90->0.99 "
+                    "blend180to540=0.90->0.99 "
+                    "filter=5cmp",
                     stock,
                     static_cast<unsigned>(
                         length),
