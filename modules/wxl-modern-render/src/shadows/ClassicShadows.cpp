@@ -3980,9 +3980,16 @@ namespace wxl::scripts::render_modern::shadows
                 return nullptr;
             }
 
-            std::string text(
+            const char* const disassemblyBytes =
                 static_cast<const char*>(
-                    textBlob->GetBufferPointer()));
+                    textBlob->GetBufferPointer());
+
+            const std::size_t disassemblySize =
+                textBlob->GetBufferSize();
+
+            std::string text(
+                disassemblyBytes,
+                disassemblySize);
 
             textBlob->Release();
 
@@ -4000,6 +4007,48 @@ namespace wxl::scripts::render_modern::shadows
             text.erase(
                 0,
                 profileStart);
+
+            // ID3DBlob is length-delimited data, not something we should
+            // treat as an unbounded C string. Some ps_3_0 permutations
+            // expose trailing NUL/non-text bytes after the valid assembly.
+            //
+            // Shader assembly from this point is pure ASCII. Truncate at
+            // the first byte that cannot belong to the textual program,
+            // then remove ordinary trailing whitespace before parsing.
+            for (
+                std::size_t textByte = 0;
+                textByte < text.size();
+                ++textByte)
+            {
+                const unsigned char value =
+                    static_cast<unsigned char>(
+                        text[textByte]);
+
+                const bool validTextByte =
+                    value == '\n' ||
+                    value == '\r' ||
+                    value == '\t' ||
+                    (value >= 0x20 && value <= 0x7E);
+
+                if (!validTextByte)
+                {
+                    text.resize(
+                        textByte);
+                    break;
+                }
+            }
+
+            while (
+                !text.empty() &&
+                (
+                    text.back() == ' ' ||
+                    text.back() == '\t' ||
+                    text.back() == '\r' ||
+                    text.back() == '\n'
+                ))
+            {
+                text.pop_back();
+            }
 
             {
                 const std::vector<ShaderLine> sourceLines =
