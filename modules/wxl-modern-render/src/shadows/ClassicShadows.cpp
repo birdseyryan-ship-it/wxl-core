@@ -368,6 +368,32 @@ namespace wxl::scripts::render_modern::shadows
             return enabled;
         }
 
+        bool ClassicShadowReceiverAliasNative540ToS9DiagnosticEnabled()
+        {
+            static const bool enabled = []()
+            {
+                char raw[16] = {};
+
+                const DWORD count =
+                    GetEnvironmentVariableA(
+                        "WXL_CLASSIC_SHADOW_RECEIVER_ALIAS_NATIVE540_TO_S9_DIAG",
+                        raw,
+                        sizeof(raw));
+
+                if (count == 0 || count >= sizeof(raw))
+                    return false;
+
+                const char c = raw[0];
+
+                return
+                    c != '0' &&
+                    c != 'n' && c != 'N' &&
+                    c != 'f' && c != 'F';
+            }();
+
+            return enabled;
+        }
+
         bool ClassicShadowReceiverBindProofEnabled()
         {
             static const bool enabled = []()
@@ -2469,13 +2495,28 @@ namespace wxl::scripts::render_modern::shadows
                 adt::kShadowCascadeExtent) =
                     540.0f;
 
-            // Publish whichever projection was actually rendered into the
-            // extension sidecar. Normally this is 180; DIAG7 deliberately
-            // publishes a duplicate 540 projection.
-            std::memcpy(
-                g_classicCascade4.matrix,
-                matrix180,
-                sizeof(matrix180));
+            // Normally publish the projection actually rendered into the
+            // extension sidecar.
+            //
+            // DIAG8 deliberately gives the custom s9 receiver the exact
+            // native-540 matrix while its texture slot is aliased to the
+            // exact native s8 texture at draw time. This isolates receiver
+            // math/sampling from sidecar render contents.
+            if (
+                ClassicShadowReceiverAliasNative540ToS9DiagnosticEnabled())
+            {
+                std::memcpy(
+                    g_classicCascade4.matrix,
+                    matrix540,
+                    sizeof(matrix540));
+            }
+            else
+            {
+                std::memcpy(
+                    g_classicCascade4.matrix,
+                    matrix180,
+                    sizeof(matrix180));
+            }
 
             g_classicCascade4.matrixValid =
                 true;
@@ -5314,11 +5355,78 @@ namespace wxl::scripts::render_modern::shadows
 
             UploadClassicCascade4ReceiverConstants();
 
-            setState(
-                gxDevice,
-                nullptr,
-                adt::kClassicCascade4StatePathA,
-                g_classicCascade4.gxObject);
+            const bool aliasNative540ToS9 =
+                ClassicShadowReceiverAliasNative540ToS9DiagnosticEnabled();
+
+            IDirect3DBaseTexture9* previousS9 = nullptr;
+            IDirect3DBaseTexture9* nativeS8 = nullptr;
+            bool rawAliasActive = false;
+
+            if (aliasNative540ToS9)
+            {
+                const HRESULT oldS9Result =
+                    rawDevice->GetTexture(
+                        9,
+                        &previousS9);
+
+                const HRESULT nativeS8Result =
+                    rawDevice->GetTexture(
+                        8,
+                        &nativeS8);
+
+                if (
+                    SUCCEEDED(oldS9Result) &&
+                    SUCCEEDED(nativeS8Result) &&
+                    nativeS8 &&
+                    SUCCEEDED(
+                        rawDevice->SetTexture(
+                            9,
+                            nativeS8)))
+                {
+                    rawAliasActive = true;
+
+                    static bool loggedNativeAlias = false;
+
+                    if (!loggedNativeAlias)
+                    {
+                        loggedNativeAlias = true;
+
+                        WLOG_INFO(
+                            "wxl-modern-r5g3c-diag8: "
+                            "native s8 texture aliased to custom s9 "
+                            "nativeS8=%p previousS9=%p "
+                            "matrix=native540 "
+                            "patchedReceiver=1",
+                            nativeS8,
+                            previousS9);
+                    }
+                }
+            }
+            else
+            {
+                setState(
+                    gxDevice,
+                    nullptr,
+                    adt::kClassicCascade4StatePathA,
+                    g_classicCascade4.gxObject);
+            }
+
+            if (
+                aliasNative540ToS9 &&
+                !rawAliasActive)
+            {
+                if (nativeS8)
+                    nativeS8->Release();
+
+                if (previousS9)
+                    previousS9->Release();
+
+                g_origClassicTerrainReceiverDraw(
+                    node,
+                    edx);
+
+                return;
+            }
 
             setState(
                 gxDevice,
@@ -5336,11 +5444,25 @@ namespace wxl::scripts::render_modern::shadows
                 adt::kGxStatePixelShader,
                 stock);
 
-            setState(
-                gxDevice,
-                nullptr,
-                adt::kClassicCascade4StatePathA,
-                nullptr);
+            if (rawAliasActive)
+            {
+                rawDevice->SetTexture(
+                    9,
+                    previousS9);
+
+                nativeS8->Release();
+
+                if (previousS9)
+                    previousS9->Release();
+            }
+            else
+            {
+                setState(
+                    gxDevice,
+                    nullptr,
+                    adt::kClassicCascade4StatePathA,
+                    nullptr);
+            }
 
             static unsigned logged = 0;
 
