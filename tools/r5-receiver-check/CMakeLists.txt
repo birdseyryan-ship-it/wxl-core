@@ -1,0 +1,12 @@
+cmake_minimum_required(VERSION 3.20)
+project(R5ReceiverCheck LANGUAGES CXX)
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+execute_process(COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/build_harness.py"
+    "${CMAKE_CURRENT_BINARY_DIR}/receiver_harness.cpp" RESULT_VARIABLE generated)
+if(NOT generated EQUAL 0)
+    message(FATAL_ERROR "Could not extract production receiver helpers")
+endif()
+add_executable(R5ReceiverSmoke "${CMAKE_CURRENT_BINARY_DIR}/receiver_harness.cpp")
+target_compile_features(R5ReceiverSmoke PRIVATE cxx_std_20)
+target_compile_definitions(R5ReceiverSmoke PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+set_property(TARGET R5ReceiverSmoke PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")

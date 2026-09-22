@@ -5,6 +5,7 @@ on:
     branches:
       - gfx-r3-modern-aa
       - gfx-r4-environment
+      - gfx-r5-shadows
   workflow_dispatch:
 
 permissions:
@@ -38,6 +39,18 @@ jobs:
 
       - name: Build d3d9 proxy
         run: cmake --build build-r3 --config Release --target d3d9 --parallel
+
+      - name: Configure R5 receiver checks
+        if: github.ref == 'refs/heads/gfx-r5-shadows'
+        run: cmake -S tools/r5-receiver-check -B build-r5check -A Win32
+
+      - name: Build R5 receiver checks
+        if: github.ref == 'refs/heads/gfx-r5-shadows'
+        run: cmake --build build-r5check --config Release --parallel
+
+      - name: Validate R5 projection and assemble receiver modes
+        if: github.ref == 'refs/heads/gfx-r5-shadows'
+        run: .\build-r5check\Release\R5ReceiverSmoke.exe
 
       - name: Stage R3 binaries
         run: |

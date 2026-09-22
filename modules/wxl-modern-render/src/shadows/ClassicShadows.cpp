@@ -25,6 +25,7 @@
 #include <d3dcompiler.h>
 
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
@@ -75,6 +76,7 @@ namespace wxl::scripts::render_modern::shadows
             // configuration stable while native slot-2=180 visibly pops.
             float matrix[16] = {};
             bool matrixValid = false;
+            float receiverProjectionRows[12] = {};
             std::uint64_t geometryFrames = 0;
 
             float extent = 180.0f;
@@ -418,6 +420,30 @@ namespace wxl::scripts::render_modern::shadows
             }();
 
             return enabled;
+        }
+
+
+        bool ClassicShadowReceiverPackedOuterDiagnosticEnabled()
+        {
+            static const bool enabled = []()
+            {
+                char raw[16] = {};
+                const DWORD count = GetEnvironmentVariableA(
+                    "WXL_CLASSIC_SHADOW_RECEIVER_PACKED_OUTER_DIAG", raw, sizeof(raw));
+                if (count == 0 || count >= sizeof(raw))
+                    return false;
+                const char c = raw[0];
+                return c != '0' && c != 'n' && c != 'N' && c != 'f' && c != 'F';
+            }();
+            return enabled;
+        }
+
+        bool ClassicShadowReceiverUsesNativeAlias()
+        {
+            // Both outer diagnostics require the exact native texture/matrix.
+            return ClassicShadowReceiverAliasNative540ToS9DiagnosticEnabled() ||
+                ClassicShadowReceiverStockOuterS8AsS9DiagnosticEnabled() ||
+                ClassicShadowReceiverPackedOuterDiagnosticEnabled();
         }
 
         bool ClassicShadowReceiverBindProofEnabled()
@@ -1666,6 +1692,95 @@ namespace wxl::scripts::render_modern::shadows
             }
         }
 
+
+        // R5 receiver projection helper (also exercised by the offline harness).
+        // The matrices use row + 4*column indexing. Map the native packed
+        // projection to the sidecar, avoiding any assumption about TEXCOORD3.
+        bool BuildClassicReceiverProjectionRows(
+            const float* nativeMatrix, const float* sidecarMatrix, float* rows)
+        {
+            if (!nativeMatrix || !sidecarMatrix || !rows)
+                return false;
+            for (int i = 0; i < 16; ++i)
+            {
+                if (!std::isfinite(nativeMatrix[i]) || !std::isfinite(sidecarMatrix[i]))
+                    return false;
+            }
+            for (int i : {3, 7, 11})
+            {
+                if (std::abs(nativeMatrix[i]) > 1.0e-6f ||
+                    std::abs(sidecarMatrix[i]) > 1.0e-6f)
+                    return false;
+            }
+            if (std::abs(nativeMatrix[15] - 1.0f) > 1.0e-6f ||
+                std::abs(sidecarMatrix[15] - 1.0f) > 1.0e-6f)
+                return false;
+
+            // Invert native XYZ in double precision, with partial pivoting.
+            double inverse[3][6] = {};
+            for (int r = 0; r < 3; ++r)
+            {
+                for (int c = 0; c < 3; ++c)
+                    inverse[r][c] = nativeMatrix[r + 4 * c];
+                inverse[r][r + 3] = 1.0;
+            }
+            for (int c = 0; c < 3; ++c)
+            {
+                int pivot = c;
+                for (int r = c + 1; r < 3; ++r)
+                    if (std::abs(inverse[r][c]) > std::abs(inverse[pivot][c]))
+                        pivot = r;
+                if (std::abs(inverse[pivot][c]) < 1.0e-12)
+                    return false;
+                for (int k = 0; k < 6; ++k)
+                {
+                    const double value = inverse[c][k];
+                    inverse[c][k] = inverse[pivot][k];
+                    inverse[pivot][k] = value;
+                }
+                const double divisor = inverse[c][c];
+                for (double& value : inverse[c])
+                    value /= divisor;
+                for (int r = 0; r < 3; ++r)
+                {
+                    if (r == c)
+                        continue;
+                    const double factor = inverse[r][c];
+                    for (int k = 0; k < 6; ++k)
+                        inverse[r][k] -= factor * inverse[c][k];
+                }
+            }
+
+            float candidate[12] = {};
+            for (int r = 0; r < 3; ++r)
+            {
+                double coefficients[3] = {};
+                double translation = sidecarMatrix[r + 12];
+                for (int c = 0; c < 3; ++c)
+                {
+                    for (int k = 0; k < 3; ++k)
+                        coefficients[c] += sidecarMatrix[r + 4 * k] * inverse[k][c + 3];
+                    translation -= coefficients[c] * nativeMatrix[c + 12];
+                    candidate[4 * r + c] = static_cast<float>(coefficients[c]);
+                }
+                candidate[4 * r + 3] = static_cast<float>(translation);
+            }
+            for (float value : candidate)
+                if (!std::isfinite(value) || std::abs(value) > 1.0e10f)
+                    return false;
+
+            // Exact identity for DIAG9/packed-outer avoids roundoff at the
+            // selector edge and makes the no-change control unambiguous.
+            if (std::memcmp(nativeMatrix, sidecarMatrix, 16 * sizeof(float)) == 0)
+            {
+                std::memset(candidate, 0, sizeof(candidate));
+                candidate[0] = candidate[5] = candidate[10] = 1.0f;
+            }
+            std::memcpy(rows, candidate, sizeof(candidate));
+            return true;
+        }
+        // End R5 receiver projection helper.
+
         bool RenderClassicGeometryTargetFromSlot2(
             const std::uint8_t* liveSnapshot,
             float targetExtent,
@@ -2529,7 +2644,7 @@ namespace wxl::scripts::render_modern::shadows
             // exact native s8 texture at draw time. This isolates receiver
             // math/sampling from sidecar render contents.
             if (
-                ClassicShadowReceiverAliasNative540ToS9DiagnosticEnabled())
+                ClassicShadowReceiverUsesNativeAlias())
             {
                 std::memcpy(
                     g_classicCascade4.matrix,
@@ -2544,10 +2659,30 @@ namespace wxl::scripts::render_modern::shadows
                     sizeof(matrix180));
             }
 
-            g_classicCascade4.matrixValid =
-                true;
+            g_classicCascade4.matrixValid = BuildClassicReceiverProjectionRows(
+                matrix540, g_classicCascade4.matrix, g_classicCascade4.receiverProjectionRows);
+            if (!g_classicCascade4.matrixValid)
+            {
+                static bool warnedProjection = false;
+                if (!warnedProjection)
+                {
+                    warnedProjection = true;
+                    WLOG_WARN("wxl-modern-r5-receiver: projection validation failed; stock fallback");
+                }
+                return;
+            }
 
             ++g_classicCascade4.geometryFrames;
+
+            if (g_classicCascade4.geometryFrames <= 4)
+            {
+                const float* const r = g_classicCascade4.receiverProjectionRows;
+                WLOG_INFO("wxl-modern-r5-receiver: packed540-to-sidecar rows "
+                    "x=%.9g/%.9g/%.9g/%.9g y=%.9g/%.9g/%.9g/%.9g "
+                    "z=%.9g/%.9g/%.9g/%.9g alias=%u",
+                    r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7],
+                    r[8], r[9], r[10], r[11], ClassicShadowReceiverUsesNativeAlias() ? 1u : 0u);
+            }
 
             if (
                 g_classicCascade4.geometryFrames <= 4)
@@ -3954,631 +4089,145 @@ namespace wxl::scripts::render_modern::shadows
                         comma - firstSpace - 1));
         }
 
-        std::string InjectClassicCascade4Receiver(
-            const std::string& text)
+
+        std::string ReplaceShaderRegisterToken(
+            std::string text, const std::string& from, const std::string& to)
         {
-            if (
-                text.find("ps_3_0") == std::string::npos ||
+            std::size_t at = 0;
+            while ((at = text.find(from, at)) != std::string::npos)
+            {
+                const std::size_t end = at + from.size();
+                const bool left = at == 0 ||
+                    !(std::isalnum(static_cast<unsigned char>(text[at - 1])) || text[at - 1] == '_');
+                const bool right = end == text.size() ||
+                    !std::isdigit(static_cast<unsigned char>(text[end]));
+                if (left && right)
+                {
+                    text.replace(at, from.size(), to);
+                    at += to.size();
+                }
+                else
+                    at = end;
+            }
+            return text;
+        }
+
+        std::string InjectClassicCascade4Receiver(const std::string& text)
+        {
+            if (text.find("ps_3_0") == std::string::npos ||
                 text.find("dcl_2d s8") == std::string::npos ||
-                text.find("dcl_2d s9") != std::string::npos ||
-                text.find("dcl_texcoord3") != std::string::npos)
+                ContainsShaderRegister(text, 's', 9))
+                return {};
+            for (int c = 31; c <= 34; ++c)
+                if (ContainsShaderRegister(text, 'c', c))
+                    return {};
+
+            std::string tc4, tc5, tc6;
+            if (!FindShaderSemanticRegister(text, "texcoord4", tc4) ||
+                !FindShaderSemanticRegister(text, "texcoord5", tc5) ||
+                !FindShaderSemanticRegister(text, "texcoord6", tc6))
+                return {};
+
+            const auto lines = SplitShaderLines(text);
+            int firstS8 = -1, lastS8 = -1;
+            unsigned samples = 0;
+            for (std::size_t i = 0; i < lines.size(); ++i)
             {
-                return std::string();
-            }
-
-            if (
-                ContainsShaderRegister(
-                    text,
-                    'c',
-                    31) ||
-                ContainsShaderRegister(
-                    text,
-                    'c',
-                    32) ||
-                ContainsShaderRegister(
-                    text,
-                    'c',
-                    33) ||
-                ContainsShaderRegister(
-                    text,
-                    'c',
-                    34) ||
-                ContainsShaderRegister(
-                    text,
-                    'c',
-                    35))
-            {
-                return std::string();
-            }
-
-            std::string tc4;
-            std::string tc5;
-            std::string tc6;
-
-            if (
-                !FindShaderSemanticRegister(
-                    text,
-                    "texcoord4",
-                    tc4) ||
-                !FindShaderSemanticRegister(
-                    text,
-                    "texcoord5",
-                    tc5) ||
-                !FindShaderSemanticRegister(
-                    text,
-                    "texcoord6",
-                    tc6))
-            {
-                return std::string();
-            }
-
-            const int maxInput =
-                MaxShaderRegister(
-                    text,
-                    'v');
-
-            if (
-                maxInput < 0 ||
-                maxInput >= 9 ||
-                ContainsShaderRegister(
-                    text,
-                    'v',
-                    9))
-            {
-                return std::string();
-            }
-
-            const int maxTemp =
-                MaxShaderRegister(
-                    text,
-                    'r');
-
-            if (
-                maxTemp < 0 ||
-                maxTemp + 7 > 31)
-            {
-                return std::string();
-            }
-
-            const std::vector<ShaderLine> lines =
-                SplitShaderLines(
-                    text);
-
-            int firstS8 = -1;
-            int lastS8 = -1;
-            unsigned s8Samples = 0;
-
-            for (
-                std::size_t i = 0;
-                i < lines.size();
-                ++i)
-            {
-                const std::string& line =
-                    lines[i].text;
-
-                const bool textureInstruction =
-                    line.compare(
-                        0,
-                        5,
-                        "texld") == 0;
-
-                if (
-                    textureInstruction &&
-                    line.find("s8") != std::string::npos)
+                if (lines[i].text.compare(0, 5, "texld") == 0 &&
+                    ContainsShaderRegister(lines[i].text, 's', 8))
                 {
-                    if (firstS8 < 0)
-                        firstS8 =
-                            static_cast<int>(i);
-
-                    lastS8 =
-                        static_cast<int>(i);
-
-                    ++s8Samples;
+                    if (firstS8 < 0) firstS8 = static_cast<int>(i);
+                    lastS8 = static_cast<int>(i);
+                    ++samples;
                 }
             }
+            if (samples != 5) return {};
 
-            if (
-                firstS8 < 0 ||
-                lastS8 < firstS8 ||
-                s8Samples != 5)
+            int outerElse = -1, outerEnd = -1;
+            for (int i = firstS8 - 1; i >= 0; --i)
             {
-                return std::string();
+                if (lines[i].text == "else") { outerElse = i; break; }
+                if (lines[i].text == "endif") return {};
             }
-
-            if (
-                ClassicShadowReceiverStockOuterS8AsS9DiagnosticEnabled())
+            for (std::size_t i = lastS8 + 1; i < lines.size(); ++i)
             {
-                const std::size_t diagnosticDclAt =
-                    AfterLastShaderDeclaration(
-                        text);
+                if (lines[i].text == "endif") { outerEnd = static_cast<int>(i); break; }
+                if (lines[i].text == "else") return {};
+            }
+            if (outerElse < 0 || outerEnd <= lastS8) return {};
+            const std::size_t start = lines[outerElse].end;
+            const std::size_t end = lines[outerEnd].begin;
+            const std::size_t dclAt = AfterLastShaderDeclaration(text);
+            if (!dclAt || dclAt >= start) return {};
+            const std::string outer = text.substr(start, end - start);
 
-                if (diagnosticDclAt == 0)
-                    return std::string();
-
-                std::string output =
-                    text;
-
-                unsigned replaced = 0;
-
-                // Change ONLY the five already-proven outer sampler reads.
-                // Coordinates, PCF offsets, result algebra and native final
-                // fade remain byte-for-byte stock assembly text.
-                for (
-                    int i = lastS8;
-                    i >= firstS8;
-                    --i)
-                {
-                    const std::size_t begin =
-                        lines[
-                            static_cast<std::size_t>(i)].begin;
-
-                    const std::size_t end =
-                        lines[
-                            static_cast<std::size_t>(i)].end;
-
-                    const std::string raw =
-                        output.substr(
-                            begin,
-                            end - begin);
-
-                    const std::size_t sampler =
-                        raw.find("s8");
-
-                    if (sampler == std::string::npos)
-                        continue;
-
-                    output.replace(
-                        begin + sampler,
-                        2,
-                        "s9");
-
-                    ++replaced;
-                }
-
-                if (replaced != 5)
-                    return std::string();
-
-                output.insert(
-                    diagnosticDclAt,
-                    "    dcl_2d s9\n");
-
-                static unsigned loggedStockAlias = 0;
-
-                if (loggedStockAlias < 5)
-                {
-                    ++loggedStockAlias;
-
-                    WLOG_INFO(
-                        "wxl-modern-r5g3c-diag9: "
-                        "stock outer receiver sampler substitution "
-                        "s8->s9 reads=5 "
-                        "coords=stock math=stock fade=stock");
-                }
-
+            // DIAG9 retains exact native coordinates, offsets, algebra and fade.
+            if (ClassicShadowReceiverStockOuterS8AsS9DiagnosticEnabled())
+            {
+                std::string output = text;
+                output.replace(start, end - start, ReplaceShaderRegisterToken(outer, "s8", "s9"));
+                output.insert(dclAt, "    dcl_2d s9\n");
                 return output;
             }
 
-            int finalElse = -1;
+            const int maxTemp = MaxShaderRegister(text, 'r');
+            if (maxTemp < 0 || maxTemp + 2 > 31) return {};
+            const std::string native = "r" + std::to_string(maxTemp + 1);
+            const std::string side = "r" + std::to_string(maxTemp + 2);
+            // No new VS output or PS input: use the already-proven packed
+            // native540 coordinates, then map directly to sidecar space.
+            const std::string projection =
+                "    mov " + native + ".x, " + tc4 + ".w\n" +
+                "    mov " + native + ".y, " + tc5 + ".w\n" +
+                "    mov " + native + ".z, " + tc6 + ".w\n" +
+                "    mov " + native + ".w, c34.z\n" +
+                "    dp4 " + side + ".x, " + native + ", c31\n" +
+                "    dp4 " + side + ".y, " + native + ", c32\n" +
+                "    dp4 " + side + ".z, " + native + ", c33\n";
 
-            for (
-                int i = firstS8 - 1;
-                i >= 0;
-                --i)
+            std::string replacement;
+            if (ClassicShadowReceiverPackedOuterDiagnosticEnabled())
             {
-                if (lines[i].text == "else")
-                {
-                    finalElse = i;
-                    break;
-                }
-
-                if (
-                    lines[i].text == "endif")
-                {
-                    break;
-                }
-            }
-
-            if (finalElse < 0)
-                return std::string();
-
-            int finalEndif = -1;
-
-            for (
-                std::size_t i =
-                    static_cast<std::size_t>(
-                        lastS8 + 1);
-                i < lines.size();
-                ++i)
-            {
-                if (lines[i].text == "endif")
-                {
-                    finalEndif =
-                        static_cast<int>(i);
-                    break;
-                }
-
-                if (
-                    lines[i].text == "else")
-                {
-                    return std::string();
-                }
-            }
-
-            if (finalEndif <= lastS8)
-                return std::string();
-
-            // R5G3C bounded diagnostic:
-            // expose only the exact live outer native receiver branch
-            // surrounding s8.  This is the branch the fourth 540 cascade
-            // must extend/replace coherently.
-            {
-                static unsigned outerBranchDiagnostics = 0;
-
-                if (outerBranchDiagnostics < 4)
-                {
-                    ++outerBranchDiagnostics;
-
-                    const int diagnosticFirst =
-                        finalElse > 3
-                            ? finalElse - 3
-                            : 0;
-
-                    const int diagnosticLast =
-                        finalEndif + 2 <
-                            static_cast<int>(lines.size())
-                                ? finalEndif + 2
-                                : static_cast<int>(lines.size()) - 1;
-
-                    WLOG_INFO(
-                        "wxl-modern-r5g3c-outer: "
-                        "receiver outer branch "
-                        "firstS8=%d lastS8=%d "
-                        "finalElse=%d finalEndif=%d "
-                        "s8Samples=%u",
-                        firstS8,
-                        lastS8,
-                        finalElse,
-                        finalEndif,
-                        s8Samples);
-
-                    for (
-                        int diagnosticLine = diagnosticFirst;
-                        diagnosticLine <= diagnosticLast;
-                        ++diagnosticLine)
-                    {
-                        WLOG_INFO(
-                            "wxl-modern-r5g3c-outer: "
-                            "line=%d text=[%s]",
-                            diagnosticLine + 1,
-                            lines[
-                                static_cast<std::size_t>(
-                                    diagnosticLine)].text.c_str());
-                    }
-                }
-            }
-
-            int resultLine =
-                finalEndif - 1;
-
-            while (
-                resultLine > lastS8 &&
-                lines[resultLine].text.empty())
-            {
-                --resultLine;
-            }
-
-            if (resultLine <= lastS8)
-                return std::string();
-
-            const std::string result =
-                ShaderDestination(
-                    lines[resultLine].text);
-
-            if (
-                result.empty() ||
-                result[0] != 'r')
-            {
-                return std::string();
-            }
-
-            const std::size_t dclAt =
-                AfterLastShaderDeclaration(
-                    text);
-
-            if (dclAt == 0)
-                return std::string();
-
-            const int T0 = maxTemp + 1;
-            const int T1 = maxTemp + 2;
-            const int T2 = maxTemp + 3;
-            const int T3 = maxTemp + 4;
-            const int T4 = maxTemp + 5;
-            const int T5 = maxTemp + 6;
-            const int T6 = maxTemp + 7;
-
-            char line[256] = {};
-
-            std::string innerBlend;
-            std::string preNative;
-            std::string postNative;
-
-            // ---------------------------------------------------------
-            // INNER 60 -> 180 COMPATIBILITY BLEND
-            //
-            // Wrath's stock nested selector keeps s7 while TEXCOORD5
-            // remains inside its footprint, then hard-switches at the
-            // final ELSE. With Classic extents that means native60 ->
-            // sidecar180.
-            //
-            // Blend only over 0.90 -> 0.99 of the native-60 footprint.
-            // ---------------------------------------------------------
-
-            std::snprintf(
-                line,
-                sizeof(line),
-                "    mov r%d.xyz, v9\n"
-                "    mov r%d.w, c34.z\n",
-                T0,
-                T0);
-            innerBlend += line;
-
-            for (int axis = 0; axis < 3; ++axis)
-            {
-                std::snprintf(
-                    line,
-                    sizeof(line),
-                    "    dp4 r%d.%c, r%d, c%d\n",
-                    T1,
-                    "xyz"[axis],
-                    T0,
-                    31 + axis);
-                innerBlend += line;
-            }
-
-            // Use the native 60 projected footprint (TEXCOORD6) to
-            // construct the transition.
-            //
-            // Live Terrain3_pcf authority:
-            //   TEXCOORD5 -> s6
-            //   TEXCOORD6 -> s7
-            //
-            // The final native branch before the outer s8 branch is s7,
-            // so the native60 -> sidecar180 transition belongs to tc6.
-            //
-            // c35.zw gives:
-            //   <=0.90 -> 1
-            //   >=0.99 -> 0
-            //
-            // Invert it so the 180 contribution rises 0 -> 1.
-            std::snprintf(
-                line,
-                sizeof(line),
-                "    abs r%d.x, %s.x\n"
-                "    abs r%d.y, %s.y\n"
-                "    max r%d.z, r%d.x, r%d.y\n"
-                "    mad_sat r%d.z, r%d.z, c35.z, c35.w\n"
-                "    add r%d.z, c34.z, -r%d.z\n",
-                T5, tc6.c_str(),
-                T5, tc6.c_str(),
-                T5, T5, T5,
-                T5, T5,
-                T5, T5);
-            innerBlend += line;
-
-            // Sidecar-180 sampling coordinates.
-            std::snprintf(
-                line,
-                sizeof(line),
-                "    mad r%d.x, r%d.x, c34.x, c34.x\n"
-                "    mad r%d.y, r%d.y, c34.x, c34.x\n"
-                "    mov r%d.w, c34.w\n",
-                T1, T1,
-                T1, T1,
-                T1);
-            innerBlend += line;
-
-            // Five comparison lookups from sidecar180.
-            std::snprintf(
-                line,
-                sizeof(line),
-                "    texldl r%d, r%d, s9\n"
-                "    add r%d.xy, r%d, c3\n"
-                "    mov r%d.zw, r%d\n"
-                "    texldl r%d, r%d, s9\n"
-                "    add r%d.x, r%d.x, r%d.x\n",
-                T2, T1,
-                T3, T1,
-                T3, T1,
-                T4, T3,
-                T2, T2, T4);
-            innerBlend += line;
-
-            const int innerOffsetConstants[3] =
-                {5, 7, 9};
-
-            for (int offset : innerOffsetConstants)
-            {
-                std::snprintf(
-                    line,
-                    sizeof(line),
-                    "    add r%d.xy, r%d, c%d\n"
-                    "    texldl r%d, r%d, s9\n"
-                    "    add r%d.x, r%d.x, r%d.x\n",
-                    T3, T1, offset,
-                    T4, T3,
-                    T2, T2, T4);
-                innerBlend += line;
-            }
-
-            // Average 180 result, then:
-            //
-            // result = native60 +
-            //          innerWeight * (sidecar180 - native60)
-            std::snprintf(
-                line,
-                sizeof(line),
-                "    mul r%d.y, r%d.x, c34.y\n"
-                "    add r%d.x, r%d.y, -%s\n"
-                "    mad %s, r%d.z, r%d.x, %s\n",
-                T2, T2,
-                T6, T2, result.c_str(),
-                result.c_str(),
-                T5,
-                T6,
-                result.c_str());
-            innerBlend += line;
-
-            // Sample the extension-owned 180 band first.
-            std::snprintf(
-                line,
-                sizeof(line),
-                "    mov r%d.xyz, v9\n"
-                "    mov r%d.w, c34.z\n",
-                T0,
-                T0);
-            preNative += line;
-
-            for (int axis = 0; axis < 3; ++axis)
-            {
-                std::snprintf(
-                    line,
-                    sizeof(line),
-                    "    dp4 r%d.%c, r%d, c%d\n",
-                    T1,
-                    "xyz"[axis],
-                    T0,
-                    31 + axis);
-                preNative += line;
-            }
-
-            // Smooth 180 -> 540 transition:
-            // <= 0.90 footprint => 180
-            // >= 0.99 footprint => native 540
-            std::snprintf(
-                line,
-                sizeof(line),
-                "    abs r%d.x, r%d.x\n"
-                "    abs r%d.y, r%d.y\n"
-                "    max r%d.x, r%d.x, r%d.y\n"
-                "    mad_sat r%d.z, r%d.x, c35.z, c35.w\n",
-                T5, T1,
-                T5, T1,
-                T5, T5, T5,
-                T5, T5);
-            preNative += line;
-
-            std::snprintf(
-                line,
-                sizeof(line),
-                "    mad r%d.x, r%d.x, c34.x, c34.x\n"
-                "    mad r%d.y, r%d.y, c34.x, c34.x\n"
-                "    mov r%d.w, c34.w\n",
-                T1, T1,
-                T1, T1,
-                T1);
-            preNative += line;
-
-            // Five comparison samples from sidecar 180.
-            std::snprintf(
-                line,
-                sizeof(line),
-                "    texldl r%d, r%d, s9\n"
-                "    add r%d.xy, r%d, c3\n"
-                "    mov r%d.zw, r%d\n"
-                "    texldl r%d, r%d, s9\n"
-                "    add r%d.x, r%d.x, r%d.x\n",
-                T2, T1,
-                T3, T1,
-                T3, T1,
-                T4, T3,
-                T2, T2, T4);
-            preNative += line;
-
-            const int offsetConstants[3] =
-                {5, 7, 9};
-
-            for (int offset : offsetConstants)
-            {
-                std::snprintf(
-                    line,
-                    sizeof(line),
-                    "    add r%d.xy, r%d, c%d\n"
-                    "    texldl r%d, r%d, s9\n"
-                    "    add r%d.x, r%d.x, r%d.x\n",
-                    T3, T1, offset,
-                    T4, T3,
-                    T2, T2, T4);
-                preNative += line;
-            }
-
-            std::snprintf(
-                line,
-                sizeof(line),
-                "    mul r%d.y, r%d.x, c34.y\n",
-                T2,
-                T2);
-            preNative += line;
-
-            // Stock native 540 branch executes unchanged between these
-            // two injected blocks.
-            //
-            // Then:
-            // result = native540 +
-            //          weight * (sidecar180 - native540)
-            std::snprintf(
-                line,
-                sizeof(line),
-                "    add r%d.x, r%d.y, -%s\n"
-                "    mad %s, r%d.z, r%d.x, %s\n",
-                T6, T2, result.c_str(),
-                result.c_str(),
-                T5,
-                T6,
-                result.c_str());
-            postNative += line;
-
-            const std::string declarations =
-                "    dcl_texcoord3 v9\n"
-                "    dcl_2d s9\n";
-
-            std::string output = text;
-
-            const std::size_t innerBlendInjectAt =
-                lines[finalElse].begin;
-
-            const std::size_t preNativeInjectAt =
-                lines[finalElse].end;
-
-            const std::size_t postNativeInjectAt =
-                lines[finalEndif].begin;
-
-            if (
-                dclAt < innerBlendInjectAt &&
-                innerBlendInjectAt < preNativeInjectAt &&
-                preNativeInjectAt < postNativeInjectAt)
-            {
-                // Highest original offsets first.
-                output.insert(
-                    postNativeInjectAt,
-                    postNative);
-
-                output.insert(
-                    preNativeInjectAt,
-                    preNative);
-
-                output.insert(
-                    innerBlendInjectAt,
-                    innerBlend);
-
-                output.insert(
-                    dclAt,
-                    declarations);
+                // Independent same-binary control: identity projection + exact
+                // native540 texture through s9, keeping the entire outer fade.
+                std::string diagnostic = ReplaceShaderRegisterToken(outer, "s8", "s9");
+                diagnostic = ReplaceShaderRegisterToken(diagnostic, tc4 + ".w", side + ".x");
+                diagnostic = ReplaceShaderRegisterToken(diagnostic, tc5 + ".w", side + ".y");
+                diagnostic = ReplaceShaderRegisterToken(diagnostic, tc6 + ".w", side + ".z");
+                replacement = projection + diagnostic;
             }
             else
             {
-                return std::string();
+                // Clone the actual native s7 branch, including its selector,
+                // five PCF reads and result conversion. Constants/registers
+                // vary across Terrain3_pcf permutations; do not hardcode them.
+                int innerElse = -1;
+                unsigned innerSamples = 0, innerSelectors = 0;
+                for (int i = outerElse - 1; i >= 0; --i)
+                {
+                    const std::string& line = lines[i].text;
+                    if (line == "else") { innerElse = i; break; }
+                    if (line == "endif") return {};
+                    if (line.compare(0, 6, "if_lt ") == 0) ++innerSelectors;
+                    if (line.compare(0, 5, "texld") == 0 &&
+                        ContainsShaderRegister(line, 's', 7)) ++innerSamples;
+                }
+                if (innerElse < 0 || innerSamples != 5 || innerSelectors != 1)
+                    return {};
+                if (ShaderDestination(lines[outerElse - 1].text) !=
+                    ShaderDestination(lines[outerEnd - 1].text))
+                    return {};
+                std::string inner = text.substr(lines[innerElse].end,
+                    lines[outerElse].begin - lines[innerElse].end);
+                inner = ReplaceShaderRegisterToken(inner, tc6, side);
+                inner = ReplaceShaderRegisterToken(inner, "s7", "s9");
+                // Native s7 remains unchanged until its selector fails.
+                // Only the new s9 branch is inserted; native s8 remains exact.
+                replacement = projection + inner + "    else\n" + outer + "    endif\n";
             }
-
+            std::string output = text;
+            output.replace(start, end - start, replacement);
+            output.insert(dclAt, "    dcl_2d s9\n");
             return output;
         }
 
@@ -5182,16 +4831,16 @@ namespace wxl::scripts::render_modern::shadows
                         "wxl-modern-r5b2g3b: "
                         "patched Terrain3_pcf receiver "
                         "stock=%p bytes=%u->%u "
-                        "world=TEXCOORD3 sidecar180=s9 "
-                        "matrixRegs=c31-c33 "
-                        "blend60to180=0.90->0.99(tc6) "
-                        "blend180to540=0.90->0.99 "
-                        "filter=5cmp",
+                        "coords=packed540-to-sidecar sidecar=s9 "
+                        "matrixRegs=c31-c33 interCascadeBlends=0 "
+                        "filter=stock5cmp mode=%s",
                         stock,
                         static_cast<unsigned>(
                             length),
                         static_cast<unsigned>(
-                            outputLength));
+                            outputLength),
+                        ClassicShadowReceiverPackedOuterDiagnosticEnabled()
+                            ? "packed-outer-diagnostic" : "nested180");
                 }
             }
 
@@ -5304,50 +4953,13 @@ namespace wxl::scripts::render_modern::shadows
 
         void UploadClassicCascade4ReceiverConstants()
         {
-            float constants[5][4] = {};
-
-            // Native shadow matrices are stored column-major. The stock
-            // terrain VS c37..c48 block consumes the first three matrix
-            // columns as dp4 rows. Preserve that exact convention for the
-            // extension-owned fourth matrix in PS c31..c33.
-            for (int row = 0; row < 3; ++row)
-            {
-                constants[row][0] =
-                    g_classicCascade4.matrix[row + 0];
-                constants[row][1] =
-                    g_classicCascade4.matrix[row + 4];
-                constants[row][2] =
-                    g_classicCascade4.matrix[row + 8];
-                constants[row][3] =
-                    g_classicCascade4.matrix[row + 12];
-            }
-
-            // c34:
-            //   x = projected [-1,+1] -> UV scale/bias
-            //   y = 1/5 for the five hardware comparison results
-            //   z = one
-            //   w = zero / texldl LOD
-            constants[3][0] = 0.5f;
-            constants[3][1] = 0.2f;
+            // c31..33 = packed540-to-sidecar affine rows; c34.z = one.
+            // No custom transition-envelope constants remain.
+            float constants[4][4] = {};
+            std::memcpy(constants, g_classicCascade4.receiverProjectionRows, 12 * sizeof(float));
             constants[3][2] = 1.0f;
-            constants[3][3] = 0.0f;
-
-            // c35:
-            //   xy = reserved Classic final-cascade fade 0.70 -> 0.99
-            //   zw = sidecar180 -> native540 overlap:
-            //        0.90 -> 0.99 of the 180 projection footprint.
-            constants[4][0] = -3.44827586f;
-            constants[4][1] =  3.41379310f;
-            constants[4][2] = -11.1111111f;
-            constants[4][3] =  11.0f;
-
-            reinterpret_cast<
-                shoff::ShaderConstantsSetHelperFn>(
-                    shoff::kShaderConstantsSet)(
-                        4,
-                        31,
-                        &constants[0][0],
-                        5);
+            reinterpret_cast<shoff::ShaderConstantsSetHelperFn>(shoff::kShaderConstantsSet)(
+                4, 31, &constants[0][0], 4);
         }
 
         void __fastcall hkClassicTerrainReceiverDraw(
@@ -5473,7 +5085,7 @@ namespace wxl::scripts::render_modern::shadows
             UploadClassicCascade4ReceiverConstants();
 
             const bool aliasNative540ToS9 =
-                ClassicShadowReceiverAliasNative540ToS9DiagnosticEnabled();
+                ClassicShadowReceiverUsesNativeAlias();
 
             IDirect3DBaseTexture9* previousS9 = nullptr;
             IDirect3DBaseTexture9* nativeS8 = nullptr;
