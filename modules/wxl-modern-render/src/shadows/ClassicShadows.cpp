@@ -4139,6 +4139,83 @@ namespace wxl::scripts::render_modern::shadows
                             "dcl_color1 ");
                     }
 
+                    // D3DDisassemble renders ps_3_0 absolute-value
+                    // source modifiers using readable vertical-bar syntax:
+                    //
+                    //     |r3|       -> r3_abs
+                    //     |r3.x|     -> r3_abs.x
+                    //     -|r3.xyz|  -> -r3_abs.xyz
+                    //
+                    // D3DAssemble expects the legacy _abs source modifier.
+                    // Normalize every complete |...| operand on the line so
+                    // all stock receiver permutations use assembler syntax.
+                    std::size_t absOpen =
+                        assemblyLine.find(
+                            '|');
+
+                    while (absOpen != std::string::npos)
+                    {
+                        const std::size_t absClose =
+                            assemblyLine.find(
+                                '|',
+                                absOpen + 1);
+
+                        if (absClose == std::string::npos)
+                            break;
+
+                        std::string absOperand =
+                            assemblyLine.substr(
+                                absOpen + 1,
+                                absClose - absOpen - 1);
+
+                        // abs(-x) == abs(x). If the disassembler ever places
+                        // the negation inside the bars, discard that inner
+                        // sign. A negation outside the bars is naturally
+                        // preserved by replacing only the |...| span.
+                        if (
+                            !absOperand.empty() &&
+                            absOperand[0] == '-')
+                        {
+                            absOperand.erase(
+                                0,
+                                1);
+                        }
+
+                        if (!absOperand.empty())
+                        {
+                            const std::size_t swizzle =
+                                absOperand.find(
+                                    '.');
+
+                            if (swizzle == std::string::npos)
+                            {
+                                absOperand +=
+                                    "_abs";
+                            }
+                            else
+                            {
+                                absOperand.insert(
+                                    swizzle,
+                                    "_abs");
+                            }
+
+                            assemblyLine.replace(
+                                absOpen,
+                                absClose - absOpen + 1,
+                                absOperand);
+
+                            absOpen =
+                                assemblyLine.find(
+                                    '|',
+                                    absOpen +
+                                        absOperand.size());
+                        }
+                        else
+                        {
+                            break;
+                        }
+                    }
+
                     normalized += assemblyLine;
                     normalized += '\n';
                 }
@@ -4186,9 +4263,9 @@ namespace wxl::scripts::render_modern::shadows
                             patched);
 
                     const std::size_t diagnosticCount =
-                        diagnosticLines.size() < 20
+                        diagnosticLines.size() < 96
                             ? diagnosticLines.size()
-                            : 20;
+                            : 96;
 
                     for (
                         std::size_t diagnosticLine = 0;
