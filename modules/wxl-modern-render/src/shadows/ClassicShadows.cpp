@@ -264,6 +264,32 @@ namespace wxl::scripts::render_modern::shadows
             return enabled;
         }
 
+        bool ClassicShadowNative540DiagnosticEnabled()
+        {
+            static const bool enabled = []()
+            {
+                char raw[16] = {};
+
+                const DWORD count =
+                    GetEnvironmentVariableA(
+                        "WXL_CLASSIC_SHADOW_NATIVE_540_DIAG",
+                        raw,
+                        sizeof(raw));
+
+                if (count == 0 || count >= sizeof(raw))
+                    return false;
+
+                const char c = raw[0];
+
+                return
+                    c != '0' &&
+                    c != 'n' && c != 'N' &&
+                    c != 'f' && c != 'F';
+            }();
+
+            return enabled;
+        }
+
         bool ClassicShadowReceiverBindProofEnabled()
         {
             static const bool enabled = []()
@@ -2023,6 +2049,110 @@ namespace wxl::scripts::render_modern::shadows
 
             float matrix180[16] = {};
             float matrix540[16] = {};
+
+            // Bounded isolation test:
+            //
+            // Keep native slots 0/1 at Classic 20/60, but render slot 2
+            // directly at 540 instead of shrinking it to 180. The
+            // extension-owned sidecar is deliberately not consumed.
+            //
+            // If the known Elwynn pop disappears here, the defect is
+            // specifically associated with making native slot 2 the
+            // 180 band rather than with the first two Classic cascades.
+            if (ClassicShadowNative540DiagnosticEnabled())
+            {
+                float matrixNative540[16] = {};
+
+                const bool renderedNative540 =
+                    RenderClassicGeometryTargetFromSlot2(
+                        liveSnapshot,
+                        540.0f,
+                        nativeCascade2Texture,
+                        matrixNative540,
+                        "native-cascade2-540-diag",
+                        work0,
+                        work10,
+                        work1C);
+
+                if (!renderedNative540)
+                {
+                    WLOG_WARN(
+                        "wxl-modern-r5g3c-diag3: "
+                        "native540 render failed");
+
+                    g_classicCascade4.matrixValid = false;
+                    return;
+                }
+
+                std::memcpy(
+                    liveBytes +
+                        adt::kShadowCascadeMatrixBase +
+                        slot *
+                        adt::kShadowCascadeMatrixStride,
+                    matrixNative540,
+                    sizeof(matrixNative540));
+
+                *reinterpret_cast<float*>(
+                    liveBytes +
+                    adt::kShadowSyntheticExtent +
+                    slot * sizeof(float)) =
+                        540.0f;
+
+                constexpr std::size_t diagnosticBoundsStride = 0x10;
+
+                const std::size_t diagnosticBoundsOffset =
+                    slot *
+                    diagnosticBoundsStride;
+
+                *reinterpret_cast<float*>(
+                    liveBytes +
+                    adt::kShadowSyntheticBound0 +
+                    diagnosticBoundsOffset) =
+                        -540.0f;
+
+                *reinterpret_cast<float*>(
+                    liveBytes +
+                    adt::kShadowSyntheticBound1 +
+                    diagnosticBoundsOffset) =
+                        540.0f;
+
+                *reinterpret_cast<float*>(
+                    liveBytes +
+                    adt::kShadowSyntheticBound2 +
+                    diagnosticBoundsOffset) =
+                        -540.0f;
+
+                *reinterpret_cast<float*>(
+                    liveBytes +
+                    adt::kShadowSyntheticBound3 +
+                    diagnosticBoundsOffset) =
+                        540.0f;
+
+                *reinterpret_cast<float*>(
+                    nativeRecord +
+                    adt::kShadowCascadeExtent) =
+                        540.0f;
+
+                // Ensure no stale sidecar matrix can participate even if
+                // somebody accidentally leaves the receiver switches on.
+                g_classicCascade4.matrixValid = false;
+
+                static bool loggedNative540 = false;
+
+                if (!loggedNative540)
+                {
+                    loggedNative540 = true;
+
+                    WLOG_INFO(
+                        "wxl-modern-r5g3c-diag3: "
+                        "native540 PASS "
+                        "extents=20/60/540 "
+                        "nativeSlot2=540 "
+                        "sidecarMatrixValid=0");
+                }
+
+                return;
+            }
 
             const bool rendered180 =
                 RenderClassicGeometryTargetFromSlot2(
