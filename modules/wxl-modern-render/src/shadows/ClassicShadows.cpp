@@ -342,6 +342,32 @@ namespace wxl::scripts::render_modern::shadows
             return enabled;
         }
 
+        bool ClassicShadowSidecarDuplicate540DiagnosticEnabled()
+        {
+            static const bool enabled = []()
+            {
+                char raw[16] = {};
+
+                const DWORD count =
+                    GetEnvironmentVariableA(
+                        "WXL_CLASSIC_SHADOW_SIDECAR_DUPLICATE_540_DIAG",
+                        raw,
+                        sizeof(raw));
+
+                if (count == 0 || count >= sizeof(raw))
+                    return false;
+
+                const char c = raw[0];
+
+                return
+                    c != '0' &&
+                    c != 'n' && c != 'N' &&
+                    c != 'f' && c != 'F';
+            }();
+
+            return enabled;
+        }
+
         bool ClassicShadowReceiverBindProofEnabled()
         {
             static const bool enabled = []()
@@ -2328,16 +2354,29 @@ namespace wxl::scripts::render_modern::shadows
                     work10,
                     work1C);
 
+            const bool duplicate540Sidecar =
+                ClassicShadowSidecarDuplicate540DiagnosticEnabled();
+
+            const float sidecarTargetExtent =
+                duplicate540Sidecar
+                    ? 540.0f
+                    : 180.0f;
+
             const bool rendered180 =
                 RenderClassicGeometryTargetFromSlot2(
                     liveSnapshot,
-                    180.0f,
+                    sidecarTargetExtent,
                     g_classicCascade4.gxObject,
                     matrix180,
-                    ClassicShadowSidecar180Share540CenterDiagnosticEnabled()
+                    (
+                        !duplicate540Sidecar &&
+                        ClassicShadowSidecar180Share540CenterDiagnosticEnabled()
+                    )
                         ? matrix540
                         : nullptr,
-                    "cascade3-sidecar180",
+                    duplicate540Sidecar
+                        ? "diag-sidecar-duplicate540"
+                        : "cascade3-sidecar180",
                     work0,
                     work10,
                     work1C);
@@ -2348,13 +2387,36 @@ namespace wxl::scripts::render_modern::shadows
             {
                 WLOG_WARN(
                     "wxl-modern-r5g3c: geometry frame incomplete "
-                    "rendered180=%u rendered540=%u "
-                    "layout=native20/60/540+sidecar180",
+                    "renderedSidecar=%u rendered540=%u "
+                    "sidecarExtent=%.9g",
                     rendered180 ? 1u : 0u,
-                    rendered540 ? 1u : 0u);
+                    rendered540 ? 1u : 0u,
+                    static_cast<double>(
+                        sidecarTargetExtent));
 
                 g_classicCascade4.matrixValid = false;
                 return;
+            }
+
+            if (duplicate540Sidecar)
+            {
+                static bool loggedDuplicate540 = false;
+
+                if (!loggedDuplicate540)
+                {
+                    loggedDuplicate540 = true;
+
+                    WLOG_INFO(
+                        "wxl-modern-r5g3c-diag7: "
+                        "sidecar duplicate540 PASS "
+                        "native540Scale00=%.9g "
+                        "sidecar540Scale00=%.9g "
+                        "receiverStillUsesS9=1",
+                        static_cast<double>(
+                            matrix540[0]),
+                        static_cast<double>(
+                            matrix180[0]));
+                }
             }
 
             // Publish the stable far 540 projection into legal native
@@ -2407,7 +2469,9 @@ namespace wxl::scripts::render_modern::shadows
                 adt::kShadowCascadeExtent) =
                     540.0f;
 
-            // The extension sidecar carries the intermediate 180 band.
+            // Publish whichever projection was actually rendered into the
+            // extension sidecar. Normally this is 180; DIAG7 deliberately
+            // publishes a duplicate 540 projection.
             std::memcpy(
                 g_classicCascade4.matrix,
                 matrix180,
