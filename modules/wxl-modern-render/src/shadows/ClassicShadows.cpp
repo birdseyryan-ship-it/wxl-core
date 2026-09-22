@@ -69,15 +69,15 @@ namespace wxl::scripts::render_modern::shadows
             bool allocationAttempted = false;
             bool casterProofReturned = false;
 
-            // G2 stores the continuously-generated launch-Classic
-            // fourth-cascade projection for the later receiver tranche.
+            // The extension-owned resource now carries the logical
+            // Classic third dynamic band (180). Native slot 2 remains
+            // the far 540 band because live movement testing proved that
+            // configuration stable while native slot-2=180 visibly pops.
             float matrix[16] = {};
             bool matrixValid = false;
             std::uint64_t geometryFrames = 0;
 
-            // Exact launch-Classic fourth-band half extent established
-            // by R5A12.  Matrix/caster use comes in later B2 tranches.
-            float extent = 540.0f;
+            float extent = 180.0f;
         };
 
         ClassicCascade4Sidecar g_classicCascade4;
@@ -2154,24 +2154,33 @@ namespace wxl::scripts::render_modern::shadows
                 return;
             }
 
-            const bool rendered180 =
-                RenderClassicGeometryTargetFromSlot2(
-                    liveSnapshot,
-                    180.0f,
-                    nativeCascade2Texture,
-                    matrix180,
-                    "cascade2-180",
-                    work0,
-                    work10,
-                    work1C);
-
+            // Final four-band architecture:
+            //
+            //   native 0 = 20
+            //   native 1 = 60
+            //   sidecar  = 180
+            //   native 2 = 540
+            //
+            // Live isolation proved native slot-2=540 is stable while
+            // native slot-2=180 causes the repeatable Elwynn movement pop.
             const bool rendered540 =
                 RenderClassicGeometryTargetFromSlot2(
                     liveSnapshot,
                     540.0f,
-                    g_classicCascade4.gxObject,
+                    nativeCascade2Texture,
                     matrix540,
-                    "cascade4-540",
+                    "cascade4-native540",
+                    work0,
+                    work10,
+                    work1C);
+
+            const bool rendered180 =
+                RenderClassicGeometryTargetFromSlot2(
+                    liveSnapshot,
+                    180.0f,
+                    g_classicCascade4.gxObject,
+                    matrix180,
+                    "cascade3-sidecar180",
                     work0,
                     work10,
                     work1C);
@@ -2181,32 +2190,32 @@ namespace wxl::scripts::render_modern::shadows
                 !rendered540)
             {
                 WLOG_WARN(
-                    "wxl-modern-r5b2g2: geometry frame incomplete "
+                    "wxl-modern-r5g3c: geometry frame incomplete "
                     "rendered180=%u rendered540=%u "
-                    "receiver4Bound=0",
+                    "layout=native20/60/540+sidecar180",
                     rendered180 ? 1u : 0u,
                     rendered540 ? 1u : 0u);
 
+                g_classicCascade4.matrixValid = false;
                 return;
             }
 
-            // The native receiver still consumes slots 0..2 at this
-            // stage.  Publish the newly rendered Classic 180 matrix
-            // into legal native slot 2 so its map/matrix pair remains
-            // coherent for the existing three-cascade receiver.
+            // Publish the stable far 540 projection into legal native
+            // slot 2. The stock receiver therefore continues to see a
+            // coherent native far map/matrix pair.
             std::memcpy(
                 liveBytes +
                     adt::kShadowCascadeMatrixBase +
                     slot *
                     adt::kShadowCascadeMatrixStride,
-                matrix180,
-                sizeof(matrix180));
+                matrix540,
+                sizeof(matrix540));
 
             *reinterpret_cast<float*>(
                 liveBytes +
                 adt::kShadowSyntheticExtent +
                 slot * sizeof(float)) =
-                    180.0f;
+                    540.0f;
 
             constexpr std::size_t boundsStride = 0x10;
             const std::size_t boundsOffset =
@@ -2216,35 +2225,36 @@ namespace wxl::scripts::render_modern::shadows
                 liveBytes +
                 adt::kShadowSyntheticBound0 +
                 boundsOffset) =
-                    -180.0f;
+                    -540.0f;
 
             *reinterpret_cast<float*>(
                 liveBytes +
                 adt::kShadowSyntheticBound1 +
                 boundsOffset) =
-                    180.0f;
+                    540.0f;
 
             *reinterpret_cast<float*>(
                 liveBytes +
                 adt::kShadowSyntheticBound2 +
                 boundsOffset) =
-                    -180.0f;
+                    -540.0f;
 
             *reinterpret_cast<float*>(
                 liveBytes +
                 adt::kShadowSyntheticBound3 +
                 boundsOffset) =
-                    180.0f;
+                    540.0f;
 
             *reinterpret_cast<float*>(
                 nativeRecord +
                 adt::kShadowCascadeExtent) =
-                    180.0f;
+                    540.0f;
 
+            // The extension sidecar carries the intermediate 180 band.
             std::memcpy(
                 g_classicCascade4.matrix,
-                matrix540,
-                sizeof(matrix540));
+                matrix180,
+                sizeof(matrix180));
 
             g_classicCascade4.matrixValid =
                 true;
@@ -3910,44 +3920,6 @@ namespace wxl::scripts::render_modern::shadows
                 return std::string();
             }
 
-            char finalDestinationRaw[32] = {};
-            char nativeFadeRaw[32] = {};
-            char nativeShadowDeltaRaw[32] = {};
-            char nativeLitRaw[32] = {};
-
-            const int finalMadFields =
-                std::sscanf(
-                    lines[resultLine].text.c_str(),
-                    "mad %31[^,], %31[^,], %31[^,], %31s",
-                    finalDestinationRaw,
-                    nativeFadeRaw,
-                    nativeShadowDeltaRaw,
-                    nativeLitRaw);
-
-            const std::string finalDestination =
-                finalDestinationRaw;
-
-            const std::string nativeFade =
-                nativeFadeRaw;
-
-            const std::string nativeShadowDelta =
-                nativeShadowDeltaRaw;
-
-            const std::string nativeLit =
-                nativeLitRaw;
-
-            if (
-                finalMadFields != 4 ||
-                finalDestination != result ||
-                nativeFade.empty() ||
-                nativeFade[0] != 'r' ||
-                nativeShadowDelta.empty() ||
-                nativeShadowDelta[0] != 'r' ||
-                nativeLit != "c0.w")
-            {
-                return std::string();
-            }
-
             const std::size_t dclAt =
                 AfterLastShaderDeclaration(
                     text);
@@ -3961,22 +3933,18 @@ namespace wxl::scripts::render_modern::shadows
             const int T3 = maxTemp + 4;
             const int T4 = maxTemp + 5;
             const int T5 = maxTemp + 6;
-            const int T6 = maxTemp + 7;
 
             char line[256] = {};
             std::string injected;
 
+            // Compute extension-owned 180 projection directly from the
+            // terrain world position supplied in TEXCOORD3.
             std::snprintf(
                 line,
                 sizeof(line),
-                "    mov r%d.xyz, v9\n",
-                T0);
-            injected += line;
-
-            std::snprintf(
-                line,
-                sizeof(line),
+                "    mov r%d.xyz, v9\n"
                 "    mov r%d.w, c34.z\n",
+                T0,
                 T0);
             injected += line;
 
@@ -3993,17 +3961,21 @@ namespace wxl::scripts::render_modern::shadows
                 injected += line;
             }
 
+            // Nested selection. We are already inside the stock final
+            // ELSE, so the near native branches have failed. Use 180
+            // while it contains the receiver; otherwise fall through
+            // untouched to the original native s8 / 540 branch.
             std::snprintf(
                 line,
                 sizeof(line),
                 "    abs r%d.x, r%d.x\n"
                 "    abs r%d.y, r%d.y\n"
                 "    max r%d.x, r%d.x, r%d.y\n"
-                "    mad_sat r%d.y, r%d.x, c35.x, c35.y\n",
+                "    if_lt r%d.x, c34.z\n",
                 T5, T1,
                 T5, T1,
                 T5, T5, T5,
-                T5, T5);
+                T5);
             injected += line;
 
             std::snprintf(
@@ -4017,6 +3989,9 @@ namespace wxl::scripts::render_modern::shadows
                 T1);
             injected += line;
 
+            // Five comparison samples, matching the established Wrath
+            // Terrain3_pcf receiver footprint. All maps remain 2048^2,
+            // so the existing one-texel offset constants remain valid.
             std::snprintf(
                 line,
                 sizeof(line),
@@ -4049,30 +4024,16 @@ namespace wxl::scripts::render_modern::shadows
                 injected += line;
             }
 
+            // c34.y = 1/5. The intermediate 180 band is not the final
+            // cascade, so do not fade it toward white. Classic authority
+            // showed nested selection and no proven inter-cascade blend.
             std::snprintf(
                 line,
                 sizeof(line),
-                "    mad r%d.x, r%d.x, c34.y, -c34.z\n"
-                "    mad r%d.y, r%d.y, r%d.x, c34.z\n",
-                T2, T2,
-                T2, T5, T2);
-            injected += line;
-
-            // The native outer receiver already computed the exact
-            // slot-2 edge fade. Do not reconstruct it from projected
-            // coordinates; consume that proven live coefficient below.
-
-            std::snprintf(
-                line,
-                sizeof(line),
-                "    add r%d.x, %s, c34.z\n"
-                "    add r%d.x, r%d.x, -r%d.y\n"
-                "    mad %s, %s, r%d.x, r%d.y\n",
-                T6, nativeShadowDelta.c_str(),
-                T6, T6, T2,
+                "    mul %s, r%d.x, c34.y\n"
+                "    else\n",
                 result.c_str(),
-                nativeFade.c_str(),
-                T6, T2);
+                T2);
             injected += line;
 
             const std::string declarations =
@@ -4081,13 +4042,24 @@ namespace wxl::scripts::render_modern::shadows
 
             std::string output = text;
 
-            const std::size_t injectAt =
+            const std::size_t branchInjectAt =
+                lines[finalElse].end;
+
+            const std::size_t closeInjectAt =
                 lines[finalEndif].begin;
 
-            if (injectAt > dclAt)
+            if (
+                dclAt < branchInjectAt &&
+                branchInjectAt < closeInjectAt)
             {
+                // Insert from highest original offset to lowest so all
+                // recorded positions remain valid.
                 output.insert(
-                    injectAt,
+                    closeInjectAt,
+                    "    endif\n");
+
+                output.insert(
+                    branchInjectAt,
                     injected);
 
                 output.insert(
@@ -4685,9 +4657,9 @@ namespace wxl::scripts::render_modern::shadows
                     "wxl-modern-r5b2g3b: "
                     "patched Terrain3_pcf receiver "
                     "stock=%p bytes=%u->%u "
-                    "world=TEXCOORD3 sampler=s9 "
+                    "world=TEXCOORD3 sidecar180=s9 "
                     "matrixRegs=c31-c33 "
-                    "filter=5cmp fade540=0.70->0.99",
+                    "nestedBeforeNative540=1 filter=5cmp",
                     stock,
                     static_cast<unsigned>(
                         length),
