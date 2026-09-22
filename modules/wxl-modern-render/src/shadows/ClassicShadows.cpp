@@ -394,6 +394,32 @@ namespace wxl::scripts::render_modern::shadows
             return enabled;
         }
 
+        bool ClassicShadowReceiverStockOuterS8AsS9DiagnosticEnabled()
+        {
+            static const bool enabled = []()
+            {
+                char raw[16] = {};
+
+                const DWORD count =
+                    GetEnvironmentVariableA(
+                        "WXL_CLASSIC_SHADOW_RECEIVER_STOCK_OUTER_S8_AS_S9_DIAG",
+                        raw,
+                        sizeof(raw));
+
+                if (count == 0 || count >= sizeof(raw))
+                    return false;
+
+                const char c = raw[0];
+
+                return
+                    c != '0' &&
+                    c != 'n' && c != 'N' &&
+                    c != 'f' && c != 'F';
+            }();
+
+            return enabled;
+        }
+
         bool ClassicShadowReceiverBindProofEnabled()
         {
             static const bool enabled = []()
@@ -4059,6 +4085,79 @@ namespace wxl::scripts::render_modern::shadows
                 return std::string();
             }
 
+            if (
+                ClassicShadowReceiverStockOuterS8AsS9DiagnosticEnabled())
+            {
+                const std::size_t diagnosticDclAt =
+                    AfterLastShaderDeclaration(
+                        text);
+
+                if (diagnosticDclAt == 0)
+                    return std::string();
+
+                std::string output =
+                    text;
+
+                unsigned replaced = 0;
+
+                // Change ONLY the five already-proven outer sampler reads.
+                // Coordinates, PCF offsets, result algebra and native final
+                // fade remain byte-for-byte stock assembly text.
+                for (
+                    int i = lastS8;
+                    i >= firstS8;
+                    --i)
+                {
+                    const std::size_t begin =
+                        lines[
+                            static_cast<std::size_t>(i)].begin;
+
+                    const std::size_t end =
+                        lines[
+                            static_cast<std::size_t>(i)].end;
+
+                    const std::string raw =
+                        output.substr(
+                            begin,
+                            end - begin);
+
+                    const std::size_t sampler =
+                        raw.find("s8");
+
+                    if (sampler == std::string::npos)
+                        continue;
+
+                    output.replace(
+                        begin + sampler,
+                        2,
+                        "s9");
+
+                    ++replaced;
+                }
+
+                if (replaced != 5)
+                    return std::string();
+
+                output.insert(
+                    diagnosticDclAt,
+                    "    dcl_2d s9\n");
+
+                static unsigned loggedStockAlias = 0;
+
+                if (loggedStockAlias < 5)
+                {
+                    ++loggedStockAlias;
+
+                    WLOG_INFO(
+                        "wxl-modern-r5g3c-diag9: "
+                        "stock outer receiver sampler substitution "
+                        "s8->s9 reads=5 "
+                        "coords=stock math=stock fade=stock");
+                }
+
+                return output;
+            }
+
             int finalElse = -1;
 
             for (
@@ -5062,20 +5161,38 @@ namespace wxl::scripts::render_modern::shadows
 
             if (wrapper)
             {
-                WLOG_INFO(
-                    "wxl-modern-r5b2g3b: "
-                    "patched Terrain3_pcf receiver "
-                    "stock=%p bytes=%u->%u "
-                    "world=TEXCOORD3 sidecar180=s9 "
-                    "matrixRegs=c31-c33 "
-                    "blend60to180=0.90->0.99(tc6) "
-                    "blend180to540=0.90->0.99 "
-                    "filter=5cmp",
-                    stock,
-                    static_cast<unsigned>(
-                        length),
-                    static_cast<unsigned>(
-                        outputLength));
+                if (
+                    ClassicShadowReceiverStockOuterS8AsS9DiagnosticEnabled())
+                {
+                    WLOG_INFO(
+                        "wxl-modern-r5b2g3b: "
+                        "patched Terrain3_pcf receiver "
+                        "stock=%p bytes=%u->%u "
+                        "DIAG9=stockOuterS8AsS9 "
+                        "coords=stock math=stock fade=stock reads=5",
+                        stock,
+                        static_cast<unsigned>(
+                            length),
+                        static_cast<unsigned>(
+                            outputLength));
+                }
+                else
+                {
+                    WLOG_INFO(
+                        "wxl-modern-r5b2g3b: "
+                        "patched Terrain3_pcf receiver "
+                        "stock=%p bytes=%u->%u "
+                        "world=TEXCOORD3 sidecar180=s9 "
+                        "matrixRegs=c31-c33 "
+                        "blend60to180=0.90->0.99(tc6) "
+                        "blend180to540=0.90->0.99 "
+                        "filter=5cmp",
+                        stock,
+                        static_cast<unsigned>(
+                            length),
+                        static_cast<unsigned>(
+                            outputLength));
+                }
             }
 
             return wrapper;
