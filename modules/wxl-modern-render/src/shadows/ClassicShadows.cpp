@@ -3706,6 +3706,56 @@ namespace wxl::scripts::render_modern::shadows
             if (finalEndif <= lastS8)
                 return std::string();
 
+            // R5G3C bounded diagnostic:
+            // expose only the exact live outer native receiver branch
+            // surrounding s8.  This is the branch the fourth 540 cascade
+            // must extend/replace coherently.
+            {
+                static unsigned outerBranchDiagnostics = 0;
+
+                if (outerBranchDiagnostics < 4)
+                {
+                    ++outerBranchDiagnostics;
+
+                    const int diagnosticFirst =
+                        finalElse > 3
+                            ? finalElse - 3
+                            : 0;
+
+                    const int diagnosticLast =
+                        finalEndif + 2 <
+                            static_cast<int>(lines.size())
+                                ? finalEndif + 2
+                                : static_cast<int>(lines.size()) - 1;
+
+                    WLOG_INFO(
+                        "wxl-modern-r5g3c-outer: "
+                        "receiver outer branch "
+                        "firstS8=%d lastS8=%d "
+                        "finalElse=%d finalEndif=%d "
+                        "s8Samples=%u",
+                        firstS8,
+                        lastS8,
+                        finalElse,
+                        finalEndif,
+                        s8Samples);
+
+                    for (
+                        int diagnosticLine = diagnosticFirst;
+                        diagnosticLine <= diagnosticLast;
+                        ++diagnosticLine)
+                    {
+                        WLOG_INFO(
+                            "wxl-modern-r5g3c-outer: "
+                            "line=%d text=[%s]",
+                            diagnosticLine + 1,
+                            lines[
+                                static_cast<std::size_t>(
+                                    diagnosticLine)].text.c_str());
+                    }
+                }
+            }
+
             int resultLine =
                 finalEndif - 1;
 
