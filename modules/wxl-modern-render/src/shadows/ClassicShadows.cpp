@@ -4131,8 +4131,15 @@ namespace wxl::scripts::render_modern::shadows
                 innerBlend += line;
             }
 
-            // Use the native 60 projected footprint (TEXCOORD5) to
+            // Use the native 60 projected footprint (TEXCOORD6) to
             // construct the transition.
+            //
+            // Live Terrain3_pcf authority:
+            //   TEXCOORD5 -> s6
+            //   TEXCOORD6 -> s7
+            //
+            // The final native branch before the outer s8 branch is s7,
+            // so the native60 -> sidecar180 transition belongs to tc6.
             //
             // c35.zw gives:
             //   <=0.90 -> 1
@@ -4147,8 +4154,8 @@ namespace wxl::scripts::render_modern::shadows
                 "    max r%d.z, r%d.x, r%d.y\n"
                 "    mad_sat r%d.z, r%d.z, c35.z, c35.w\n"
                 "    add r%d.z, c34.z, -r%d.z\n",
-                T5, tc5.c_str(),
-                T5, tc5.c_str(),
+                T5, tc6.c_str(),
+                T5, tc6.c_str(),
                 T5, T5, T5,
                 T5, T5,
                 T5, T5);
@@ -4956,7 +4963,7 @@ namespace wxl::scripts::render_modern::shadows
                     "stock=%p bytes=%u->%u "
                     "world=TEXCOORD3 sidecar180=s9 "
                     "matrixRegs=c31-c33 "
-                    "blend60to180=0.90->0.99 "
+                    "blend60to180=0.90->0.99(tc6) "
                     "blend180to540=0.90->0.99 "
                     "filter=5cmp",
                     stock,
