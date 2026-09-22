@@ -238,6 +238,32 @@ namespace wxl::scripts::render_modern::shadows
             return enabled;
         }
 
+        bool ClassicShadowKeepNativeFarDiagnosticEnabled()
+        {
+            static const bool enabled = []()
+            {
+                char raw[16] = {};
+
+                const DWORD count =
+                    GetEnvironmentVariableA(
+                        "WXL_CLASSIC_SHADOW_KEEP_NATIVE_FAR_DIAG",
+                        raw,
+                        sizeof(raw));
+
+                if (count == 0 || count >= sizeof(raw))
+                    return false;
+
+                const char c = raw[0];
+
+                return
+                    c != '0' &&
+                    c != 'n' && c != 'N' &&
+                    c != 'f' && c != 'F';
+            }();
+
+            return enabled;
+        }
+
         bool ClassicShadowReceiverBindProofEnabled()
         {
             static const bool enabled = []()
@@ -1827,6 +1853,36 @@ namespace wxl::scripts::render_modern::shadows
                 quality != 5 ||
                 mapDimension != 2048)
             {
+                return;
+            }
+
+            // Diagnostic isolation:
+            //
+            // PrepareClassicShadowGeometry() has already asked the native
+            // builder for 20 / 60 / broad-640. Normally G2 now replaces
+            // legal slot 2 with the Classic 180 map and also renders the
+            // 540 sidecar.
+            //
+            // When this switch is enabled, deliberately stop here so the
+            // native receiver sees 20 / 60 / 640. This isolates whether
+            // the visible movement pop begins specifically with the
+            // post-build 640 -> 180 conversion.
+            if (ClassicShadowKeepNativeFarDiagnosticEnabled())
+            {
+                static bool logged = false;
+
+                if (!logged)
+                {
+                    logged = true;
+
+                    WLOG_INFO(
+                        "wxl-modern-r5g3c-diag: "
+                        "native far retained "
+                        "extents=20/60/640 "
+                        "render180=0 render540=0");
+                }
+
+                g_classicCascade4.matrixValid = false;
                 return;
             }
 
