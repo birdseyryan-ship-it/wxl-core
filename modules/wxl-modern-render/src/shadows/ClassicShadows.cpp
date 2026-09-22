@@ -316,6 +316,32 @@ namespace wxl::scripts::render_modern::shadows
             return enabled;
         }
 
+        bool ClassicShadowSidecar180Share540CenterDiagnosticEnabled()
+        {
+            static const bool enabled = []()
+            {
+                char raw[16] = {};
+
+                const DWORD count =
+                    GetEnvironmentVariableA(
+                        "WXL_CLASSIC_SHADOW_SIDECAR180_SHARE540_CENTER_DIAG",
+                        raw,
+                        sizeof(raw));
+
+                if (count == 0 || count >= sizeof(raw))
+                    return false;
+
+                const char c = raw[0];
+
+                return
+                    c != '0' &&
+                    c != 'n' && c != 'N' &&
+                    c != 'f' && c != 'F';
+            }();
+
+            return enabled;
+        }
+
         bool ClassicShadowReceiverBindProofEnabled()
         {
             static const bool enabled = []()
@@ -1567,6 +1593,7 @@ namespace wxl::scripts::render_modern::shadows
             float targetExtent,
             void* targetTexture,
             float* matrixOut,
+            const float* xyAnchorMatrix,
             const char* label,
             std::uint32_t work0,
             std::uint32_t work10,
@@ -1788,6 +1815,51 @@ namespace wxl::scripts::render_modern::shadows
                 recordArgument,
                 cloneObject,
                 2);
+
+            if (
+                xyAnchorMatrix &&
+                targetExtent == 180.0f)
+            {
+                constexpr float anchorScale =
+                    540.0f / 180.0f;
+
+                for (int outputRow = 0; outputRow < 2; ++outputRow)
+                {
+                    for (int column = 0; column < 4; ++column)
+                    {
+                        const int matrixIndex =
+                            outputRow +
+                            column * 4;
+
+                        cloneMatrix[matrixIndex] =
+                            xyAnchorMatrix[matrixIndex] *
+                            anchorScale;
+                    }
+                }
+
+                static bool loggedSharedCenter = false;
+
+                if (!loggedSharedCenter)
+                {
+                    loggedSharedCenter = true;
+
+                    WLOG_INFO(
+                        "wxl-modern-r5g3c-diag5: "
+                        "sidecar180 shares native540 XY centre "
+                        "anchorScale=%.9g "
+                        "scale00=%.9g "
+                        "translationXY=%.9g/%.9g "
+                        "zProjectionOwnBuilder=1",
+                        static_cast<double>(
+                            anchorScale),
+                        static_cast<double>(
+                            cloneMatrix[0]),
+                        static_cast<double>(
+                            cloneMatrix[12]),
+                        static_cast<double>(
+                            cloneMatrix[13]));
+                }
+            }
 
             // Restore any shared CPU-side state immediately after the
             // matrix builder.  The clone matrix is extension-owned.
@@ -2149,6 +2221,7 @@ namespace wxl::scripts::render_modern::shadows
                         540.0f,
                         nativeCascade2Texture,
                         matrixNative540,
+                        nullptr,
                         "native-cascade2-540-diag",
                         work0,
                         work10,
@@ -2249,6 +2322,7 @@ namespace wxl::scripts::render_modern::shadows
                     540.0f,
                     nativeCascade2Texture,
                     matrix540,
+                    nullptr,
                     "cascade4-native540",
                     work0,
                     work10,
@@ -2260,6 +2334,9 @@ namespace wxl::scripts::render_modern::shadows
                     180.0f,
                     g_classicCascade4.gxObject,
                     matrix180,
+                    ClassicShadowSidecar180Share540CenterDiagnosticEnabled()
+                        ? matrix540
+                        : nullptr,
                     "cascade3-sidecar180",
                     work0,
                     work10,
