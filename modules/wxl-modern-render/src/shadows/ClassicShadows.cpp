@@ -4249,32 +4249,81 @@ namespace wxl::scripts::render_modern::shadows
                 FAILED(hr) ||
                 !codeBlob)
             {
-                // Bounded R3 diagnostic: expose the actual source handed
-                // to D3DAssemble. Log once only; no rendering behaviour
-                // changes and stock fallback remains unchanged.
-                static bool receiverAsmDiagnosticLogged = false;
+                // Bounded diagnostic: report the exact neighbourhood
+                // around each assembler-reported failure rather than only
+                // the beginning of the shader. Rendering behaviour remains
+                // unchanged and stock fallback remains intact.
+                static unsigned receiverAsmDiagnosticCount = 0;
 
-                if (!receiverAsmDiagnosticLogged)
+                if (receiverAsmDiagnosticCount < 4)
                 {
-                    receiverAsmDiagnosticLogged = true;
+                    ++receiverAsmDiagnosticCount;
 
                     const std::vector<ShaderLine> diagnosticLines =
                         SplitShaderLines(
                             patched);
 
-                    const std::size_t diagnosticCount =
-                        diagnosticLines.size() < 96
-                            ? diagnosticLines.size()
-                            : 96;
+                    unsigned failureLine = 0;
+
+                    const char* const errorText =
+                        errorBlob
+                            ? static_cast<const char*>(
+                                  errorBlob->GetBufferPointer())
+                            : nullptr;
+
+                    if (errorText)
+                    {
+                        std::sscanf(
+                            errorText,
+                            "Line %u:",
+                            &failureLine);
+                    }
+
+                    WLOG_WARN(
+                        "wxl-modern-r5b2g3b-diag: "
+                        "failure stock=%p reportedLine=%u totalLines=%u",
+                        stock,
+                        failureLine,
+                        static_cast<unsigned>(
+                            diagnosticLines.size()));
+
+                    std::size_t firstLine = 0;
+                    std::size_t lastLine =
+                        diagnosticLines.size();
+
+                    if (
+                        failureLine > 0 &&
+                        failureLine <= diagnosticLines.size())
+                    {
+                        firstLine =
+                            failureLine > 5
+                                ? static_cast<std::size_t>(
+                                      failureLine - 5)
+                                : 0;
+
+                        lastLine =
+                            static_cast<std::size_t>(
+                                failureLine + 4);
+
+                        if (lastLine > diagnosticLines.size())
+                            lastLine = diagnosticLines.size();
+                    }
+                    else
+                    {
+                        lastLine =
+                            diagnosticLines.size() < 32
+                                ? diagnosticLines.size()
+                                : 32;
+                    }
 
                     for (
-                        std::size_t diagnosticLine = 0;
-                        diagnosticLine < diagnosticCount;
+                        std::size_t diagnosticLine = firstLine;
+                        diagnosticLine < lastLine;
                         ++diagnosticLine)
                     {
                         WLOG_WARN(
                             "wxl-modern-r5b2g3b-diag: "
-                            "asm-input line %u: [%s]",
+                            "asm-context line %u: [%s]",
                             static_cast<unsigned>(
                                 diagnosticLine + 1),
                             diagnosticLines[
