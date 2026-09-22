@@ -1450,25 +1450,6 @@ namespace wxl::scripts::render_modern::shadows
                 640.0f,
             };
 
-            // Preserve Wrath's original recenter-distance / extent ratios
-            // while using the smaller Classic launch-era cascade extents.
-            //
-            // Wrath:
-            //   40  -> 2 units  -> 4 squared
-            //   160 -> 4 units  -> 16 squared
-            //   640 -> 32 units -> 1024 squared
-            //
-            // R5 stock build:
-            //   20  -> 1.0 units -> 1.0 squared
-            //   60  -> 1.5 units -> 2.25 squared
-            //   640 -> 32 units  -> 1024 squared
-            constexpr float stockBuildRecenterSq[3] =
-            {
-                1.0f,
-                2.25f,
-                1024.0f,
-            };
-
             for (std::size_t slot = 0; slot < 3; ++slot)
             {
                 *reinterpret_cast<float*>(
@@ -1486,11 +1467,6 @@ namespace wxl::scripts::render_modern::shadows
                     record +
                     adt::kShadowCascadeExtent) =
                         stockBuildExtents[slot];
-
-                *reinterpret_cast<float*>(
-                    record +
-                    adt::kShadowCascadeRecenterSq) =
-                        stockBuildRecenterSq[slot];
             }
 
             static bool logged = false;
@@ -1673,22 +1649,6 @@ namespace wxl::scripts::render_modern::shadows
                 reinterpret_cast<const void*>(
                     casterState),
                 sizeof(casterStateSnapshot));
-
-            // Slot 2's stock 640 extent uses a 32-world-unit recenter
-            // distance, i.e. 5% of its half-extent. Preserve that cadence
-            // for each rebuilt target rather than inheriting the full
-            // 32-unit threshold on much smaller projections.
-            const float targetRecenterDistance =
-                targetExtent * 0.05f;
-
-            const float targetRecenterSq =
-                targetRecenterDistance *
-                targetRecenterDistance;
-
-            *reinterpret_cast<float*>(
-                nativeRecord +
-                adt::kShadowCascadeRecenterSq) =
-                    targetRecenterSq;
 
             builder(
                 cloneRecord,
@@ -2094,12 +2054,6 @@ namespace wxl::scripts::render_modern::shadows
                 nativeRecord +
                 adt::kShadowCascadeExtent) =
                     180.0f;
-
-            // 180 * 0.05 = 9 world units; squared threshold = 81.
-            *reinterpret_cast<float*>(
-                nativeRecord +
-                adt::kShadowCascadeRecenterSq) =
-                    81.0f;
 
             std::memcpy(
                 g_classicCascade4.matrix,
