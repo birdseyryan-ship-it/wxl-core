@@ -6,6 +6,7 @@ on:
       - gfx-r3-modern-aa
       - gfx-r4-environment
       - gfx-r5-shadows
+      - gfx-r6-water-diagnostics
   workflow_dispatch:
 
 permissions:
@@ -41,16 +42,30 @@ jobs:
         run: cmake --build build-r3 --config Release --target d3d9 --parallel
 
       - name: Configure R5 receiver checks
-        if: github.ref == 'refs/heads/gfx-r5-shadows'
+        if: github.ref == 'refs/heads/gfx-r5-shadows' || github.ref == 'refs/heads/gfx-r6-water-diagnostics'
         run: cmake -S tools/r5-receiver-check -B build-r5check -A Win32
 
       - name: Build R5 receiver checks
-        if: github.ref == 'refs/heads/gfx-r5-shadows'
+        if: github.ref == 'refs/heads/gfx-r5-shadows' || github.ref == 'refs/heads/gfx-r6-water-diagnostics'
         run: cmake --build build-r5check --config Release --parallel
 
       - name: Validate R5 projection and assemble receiver modes
-        if: github.ref == 'refs/heads/gfx-r5-shadows'
+        if: github.ref == 'refs/heads/gfx-r5-shadows' || github.ref == 'refs/heads/gfx-r6-water-diagnostics'
         run: .\build-r5check\Release\R5ReceiverSmoke.exe
+
+      - name: Configure R6 diagnostic checks
+        if: github.ref == 'refs/heads/gfx-r6-water-diagnostics'
+        run: cmake -S tools/r6-water-check -B build-r6check -A Win32
+
+      - name: Build and validate R6 diagnostic policy
+        if: github.ref == 'refs/heads/gfx-r6-water-diagnostics'
+        run: |
+          cmake --build build-r6check --config Release --parallel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .\build-r6check\Release\R6WaterCheck.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m unittest discover -s tools/r6-water-check -p test_capture.py -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Stage R3 binaries
         run: |
