@@ -86,9 +86,9 @@ unsigned worldSceneDepth=0,postWaterProbed=0,postWaterRecords=0;
 bool waterCandidateSeen=false,snapshotValid=false;
 uint64_t snapshotSerial=0,snapshotFrame=0,snapshotProducerOrdinal=0;
 uintptr_t snapshotSourceRtToken=0;
-unsigned snapshotAttempts=0,snapshotSuccesses=0;
-bool snapshotCapReported=false;
-constexpr unsigned kSnapshotAttemptLimit=8,kPostWaterProbeLimit=128,kPostWaterRecordLimit=16;
+unsigned snapshotAttempts=0,snapshotSuccesses=0,snapshotGenerationAttempts=0;
+bool snapshotCapReported=false,snapshotGenerationCapReported=false;
+constexpr unsigned kSnapshotAttemptLimit=8,kSnapshotAttemptsPerGeneration=4,kPostWaterProbeLimit=128,kPostWaterRecordLimit=16;
 
 Json Record(const char* event){Json j;j.Num("schema",1);j.Str("event",event);j.Num("frame",frame);j.Num("generation",generation);j.Num("sequence",++sequence);j.Num("world_epoch",worldEpoch);j.Num("view",view);j.Num("world_scene_serial",worldSceneSerial);j.Str("phase",phase);return j;}
 bool Enqueue(Json j){auto line=j.End()+'\n';if(line.size()>kQueueLimit-pendingBytes){++outputBudget.dropped;return false;}
@@ -303,6 +303,7 @@ void SnapshotAtWater(const native::Context& c) noexcept{
         if(!config.copyRequested)return;
         if(liquidDrawsScene!=0){auto j=SnapshotRecord();j.Bool("attempted",false);j.Str("reason","prior_liquid_draw_seen");j.Num("liquid_draws_before_candidate",liquidDrawsScene);Enqueue(std::move(j));return;}
         if(snapshotAttempts>=kSnapshotAttemptLimit){if(!snapshotCapReported){auto j=SnapshotRecord();j.Bool("attempted",false);j.Str("reason","process_attempt_cap_reached");j.Num("cap",kSnapshotAttemptLimit);Enqueue(std::move(j));snapshotCapReported=true;}return;}
+        if(snapshotGenerationAttempts>=kSnapshotAttemptsPerGeneration){if(!snapshotGenerationCapReported){auto j=SnapshotRecord();j.Bool("attempted",false);j.Str("reason","generation_attempt_cap_reached");j.Num("cap",kSnapshotAttemptsPerGeneration);Enqueue(std::move(j));snapshotGenerationCapReported=true;}return;}
         if(FAILED(before.rtHr)||!before.rt.p||FAILED(srcDescHr)){auto j=SnapshotRecord();j.Bool("attempted",false);j.Str("reason","source_rt_unavailable");j.Num("rt_hr",int32_t(before.rtHr));j.Num("desc_hr",int32_t(srcDescHr));Enqueue(std::move(j));return;}
 
         HRESULT createHr=S_OK,levelHr=S_OK;const bool targetOk=EnsureSnapshotTarget(device,srcDesc,createHr,levelHr);
@@ -312,7 +313,7 @@ void SnapshotAtWater(const native::Context& c) noexcept{
         const bool compatible=targetOk&&snapshotDesc.Width==srcDesc.Width&&snapshotDesc.Height==srcDesc.Height&&snapshotDesc.Format==srcDesc.Format&&snapshotDesc.MultiSampleType==D3DMULTISAMPLE_NONE;
         if(!targetOk||!distinct||!compatible){auto j=SnapshotRecord();j.Bool("attempted",false);j.Str("reason","owned_target_unavailable_or_incompatible");j.Num("create_hr",int32_t(createHr));j.Num("surface_level_hr",int32_t(levelHr));j.Bool("distinct",distinct);j.Bool("compatible",compatible);j.Raw("source",Surface(before.rt.p,before.rtHr));j.Raw("destination",Surface(snapshotSurface,targetOk?S_OK:D3DERR_INVALIDCALL));Enqueue(std::move(j));return;}
 
-        ++snapshotAttempts;LARGE_INTEGER qa{},qb{};QueryPerformanceCounter(&qa);
+        ++snapshotAttempts;++snapshotGenerationAttempts;LARGE_INTEGER qa{},qb{};QueryPerformanceCounter(&qa);
         const HRESULT endHr=static_cast<HRESULT>(wxl::runtime::render::EndSceneForPostProcess(device));
         HRESULT stretchHr=D3DERR_INVALIDCALL,beginHr=D3DERR_INVALIDCALL;
         if(SUCCEEDED(endHr)){
@@ -327,7 +328,7 @@ void SnapshotAtWater(const native::Context& c) noexcept{
         if(success){snapshotValid=true;snapshotSerial=worldSceneSerial;snapshotFrame=frame;snapshotProducerOrdinal=candidateOrdinal;++snapshotSuccesses;}
         else{snapshotValid=false;snapshotSerial=0;snapshotFrame=0;snapshotProducerOrdinal=0;}
 
-        auto j=SnapshotRecord();j.Bool("attempted",true);j.Num("attempt_index",snapshotAttempts);j.Num("producer_draw_ordinal",candidateOrdinal);
+        auto j=SnapshotRecord();j.Bool("attempted",true);j.Num("attempt_index",snapshotAttempts);j.Num("generation_attempt_index",snapshotGenerationAttempts);j.Num("producer_draw_ordinal",candidateOrdinal);
         j.Num("end_scene_hr",int32_t(endHr));j.Num("stretch_rect_hr",int32_t(stretchHr));j.Num("begin_scene_hr",int32_t(beginHr));j.Num("bracket_cpu_ticks",uint64_t(qb.QuadPart-qa.QuadPart));j.Num("qpc_frequency",frequency.QuadPart);
         j.Bool("source_destination_distinct",distinct);j.Bool("descriptor_compatible",compatible);j.Bool("state_preserved",statePreserved);j.Bool("snapshot_valid",success);
         j.Raw("source",Surface(before.rt.p,before.rtHr));j.Raw("destination",Surface(snapshotSurface,S_OK));j.Raw("state_before",ProbeJson(before));if(SUCCEEDED(beginHr))j.Raw("state_after",ProbeJson(after));
@@ -382,7 +383,7 @@ bool Swap(void** slot,void* hook,void** original){if(*slot==hook)return true;DWO
     *original=*slot;InterlockedExchangePointer(slot,hook);DWORD ignored=0;return VirtualProtect(slot,sizeof(void*),p,&ignored)!=FALSE;}
 void Device(IDirect3DDevice9* d){
     if(!d)return;if(device==d)return;
-    if(device){ReleaseShaders();ReleaseSnapshot();}device=d;renderThread=GetCurrentThreadId();lost=false;++generation;
+    if(device){ReleaseShaders();ReleaseSnapshot();}device=d;renderThread=GetCurrentThreadId();lost=false;++generation;snapshotGenerationAttempts=0;snapshotGenerationCapReported=false;
     void** v=*reinterpret_cast<void***>(d);Chain* c=Find(d);if(!c){for(auto& x:chains)if(!x.table){c=&x;break;}}
     if(!c){quarantined=true;return;}
     if(!c->table){c->table=v;
@@ -413,7 +414,7 @@ void Summary(){auto j=Record("summary");j.Num("liquid_dips_observed",observed);j
     j.Num("unknown_draws",familyCounts[0]);j.Num("water_draws",familyCounts[1]);j.Num("nospec_draws",familyCounts[2]);j.Num("procwater_draws",familyCounts[3]);j.Num("magma_draws",familyCounts[4]);
     j.Num("draw_primitive_calls",drawApiCounts[0]);j.Num("draw_indexed_primitive_calls",drawApiCounts[1]);j.Num("draw_primitive_up_calls",drawApiCounts[2]);j.Num("draw_indexed_primitive_up_calls",drawApiCounts[3]);
     j.Num("draw_primitive_failures",drawApiFailures[0]);j.Num("draw_indexed_primitive_failures",drawApiFailures[1]);j.Num("draw_primitive_up_failures",drawApiFailures[2]);j.Num("draw_indexed_primitive_up_failures",drawApiFailures[3]);
-    j.Num("snapshot_attempts",snapshotAttempts);j.Num("snapshot_successes",snapshotSuccesses);j.Num("snapshot_attempt_cap",kSnapshotAttemptLimit);
+    j.Num("snapshot_attempts",snapshotAttempts);j.Num("snapshot_successes",snapshotSuccesses);j.Num("snapshot_generation_attempts",snapshotGenerationAttempts);j.Num("snapshot_attempt_cap",kSnapshotAttemptLimit);j.Num("snapshot_generation_attempt_cap",kSnapshotAttemptsPerGeneration);
     j.Bool("quarantined",quarantined);j.Str("timing_limit","CPU submission/inspection and snapshot bracket only; no GPU timing claim");Enqueue(std::move(j));}
 void OnEndScene(void*,const void* a){if(!ready||lost||quarantined)return;try{Device(static_cast<IDirect3DDevice9*>(static_cast<const ev::EndSceneArgs*>(a)->device));}catch(...){Failure();}}
 void OnFrame(void*,const void*){if(!ready||GetCurrentThreadId()!=renderThread)return;try{if(frame%300==0)Summary();Flush();++frame;}catch(...){Failure();}}
@@ -467,7 +468,7 @@ bool Install(){
         ev::Subscribe(ev::Event::OnWorldSceneEnd,&OnSceneEnd,nullptr);ev::Subscribe(ev::Event::OnWorldRenderEnd,&OnWorldEnd,nullptr);
         ready=true;auto j=Record("session");j.Str("exe_sha256",kExeSha);j.Num("mode",unsigned(config.mode));j.Num("samples_per_profile",config.samples);j.Num("max_draws",config.maxDraws);j.Num("max_mib",config.maxMiB);
         j.Bool("copy_requested",config.copyRequested);j.Bool("copy_supported",true);j.Bool("replacement_supported",false);
-        j.Num("copy_attempt_cap",kSnapshotAttemptLimit);j.Str("copy_gate","Diagnostic only: first base-Water material in one world-scene serial; native water is never suppressed or replaced");
+        j.Num("copy_attempt_cap",kSnapshotAttemptLimit);j.Num("copy_attempts_per_generation",kSnapshotAttemptsPerGeneration);j.Str("copy_gate","Diagnostic only: first base-Water material in one world-scene serial; four attempts are reserved per device generation and native water is never suppressed or replaced");
         j.Str("classic_target_controls","water 0..3; ripple 0..2; reflection 0 screen,1 sky,2 sky+terrain,3 sky+terrain+WMO; not Wrath live setting values");
         Enqueue(std::move(j));Flush();WLOG_INFO("r6-water: native-preserving diagnostic enabled; output=%s",capturePath.c_str());
         if(config.copyRequested)WLOG_INFO("r6-water: bounded pre-Water colour snapshot proof armed; max attempts=%u; no replacement",kSnapshotAttemptLimit);

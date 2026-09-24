@@ -73,8 +73,12 @@ def audit(path, extract=None):
                 if r.get('attempted') is True:
                     cap = limits.get('copy_attempt_cap')
                     index = r.get('attempt_index')
+                    generation_cap = limits.get('copy_attempts_per_generation')
+                    generation_index = r.get('generation_attempt_index')
                     if not isinstance(cap, int) or cap < 0 or not isinstance(index, int) or not 1 <= index <= cap:
                         raise ValueError('snapshot attempt exceeds declared cap')
+                    if not isinstance(generation_cap, int) or generation_cap < 1 or not isinstance(generation_index, int) or not 1 <= generation_index <= generation_cap:
+                        raise ValueError('snapshot attempt exceeds declared generation cap')
                     if r.get('snapshot_valid') is True:
                         for key in ('end_scene_hr','stretch_rect_hr','begin_scene_hr'):
                             if not isinstance(r.get(key), int) or r[key] < 0:

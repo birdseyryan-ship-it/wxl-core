@@ -13,7 +13,7 @@ All R6 work defaults off. Set `WXL_CLASSIC_WATER_DIAG=1` to enable. Invalid sett
 | WXL_CLASSIC_WATER_DIAG_SAMPLES | 3 | 1–4 samples per profile, repeated samples at least 180 presented frames apart |
 | WXL_CLASSIC_WATER_DIAG_MAX_DRAWS | 256 | 1–512 admitted draw records across the process, including resets |
 | WXL_CLASSIC_WATER_DIAG_MAX_MIB | 16 | 1–32 MiB hard output ceiling; 2 MiB pending CPU queue; ≤256 KiB written per Present |
-| WXL_CLASSIC_WATER_DIAG_COPY | 0 | 0 observes ordering only; 1 arms the bounded colour-only pre-Water snapshot proof (maximum 8 attempts); native rendering still continues |
+| WXL_CLASSIC_WATER_DIAG_COPY | 0 | 0 observes ordering only; 1 arms the bounded colour-only pre-Water snapshot proof (maximum 8 process-wide, 4 per device generation); native rendering still continues |
 
 No setter/replacement flag exists. COPY=1 is diagnostic only and cannot suppress or replace a native draw. It proves nothing until the emitted snapshot/order evidence passes audit and the live reset/regression checks. Depth resolve remains deliberately out of scope. Heavy capture is unsuitable for performance measurements; use timing and off for those comparisons.
 
@@ -33,14 +33,14 @@ Output: `Logs/r6-water-<process>-<tick>.ndjson`. Every record contains schema=1,
 
 | Event | Payload / limits |
 | --- | --- |
-| session | Executable authority, effective mode/limits, `copy_supported=true`, `replacement_supported=false`, and the eight-attempt copy ceiling; Classic target controls are labelled target metadata, not live Wrath CVar values |
+| session | Executable authority, effective mode/limits, `copy_supported=true`, `replacement_supported=false`, the eight-attempt process ceiling and four-attempt per-device-generation ceiling; Classic target controls are labelled target metadata, not live Wrath CVar values |
 | device | First-observed/reset device, prior draw-owner module/RVA, caps, MSAA and present parameters; the diagnostic snapshot target is allocated lazily only after a verified Water candidate |
 | boundary | Before/after one native liquid invocation, pass, instance count, RT0/depth descriptors, viewport, phase; ≤128 records process-wide |
 | shader | Final observed VS/PS object, process-unique ID, SHA256, size/version and full-mode exact little-endian bytecode hex; at most 128 simultaneously retained shader objects; ≤64 KiB each |
 | draw | Liquid-scoped material/settings/provider/pass; shader SHA256s; declaration/FVF; topology/streams/indices; render states/hash; RT/depth/viewport; full-mode 16 pixel and 4 vertex texture/sampler stages and constant blocks |
 | world_scene | Outer world-scene begin/end serial, draw ordinals, target/state envelope, first/last liquid ordinal, post-Water counts and provisional ordering result |
 | water_candidate | First verified base-Water material entry for the outer world-scene serial; records producer ordinal and whether earlier liquid draws already occurred |
-| snapshot_attempt | At most 8 process-wide: direct-original EndScene/StretchRect/BeginScene HRESULTs, CPU bracket ticks, source/destination descriptors and state-preservation result; `replacement_allowed=false` |
+| snapshot_attempt | At most 8 process-wide and 4 per device generation: direct-original EndScene/StretchRect/BeginScene HRESULTs, CPU bracket ticks, source/destination descriptors and state-preservation result; `replacement_allowed=false` |
 | post_water_draw | At most 16 detailed records from a bounded 128-probe window after the candidate, classifying likely late opaque same-RT writes versus unclassified work |
 | summary | Counts, failures, profile admissions, queue/output/drop counts and CPU ticks/frequency |
 | lost/reset/world_leave/shutdown | Lifecycle evidence; invalidation and final pending/drop counts |
@@ -55,6 +55,6 @@ Run `python tools/r6-water-check/audit_capture.py <capture.ndjson> --extract <ne
 
 With COPY=0 the module remains observational. With COPY=1, the only mutation is a bounded diagnostic scene bracket: retain explicit COM references to current RT0/depth and state, call the direct-original `EndScene`, `StretchRect` RT0 into an R6-owned single-sample `D3DPOOL_DEFAULT` render-target texture of matching size/format, then call `BeginScene` exactly once when EndScene succeeded. The snapshot texture is never bound or sampled by this candidate. RT0/depth/viewport and relevant render state are re-probed afterward; any BeginScene failure quarantines the diagnostic. There is no target binding, constant substitution, replacement draw, readback, GPU query or depth copy.
 
-Verify in one home session: matching native appearance; the first Water candidate occurs before the first liquid draw; no likely opaque same-RT writes occur after the candidate; all attempted EndScene/StretchRect/BeginScene brackets succeed; state is preserved; reset/lost recovery releases and lazily recreates the DEFAULT-pool snapshot resource; grass/shadow/UI/AO remain intact; and off/timing performance stays unchanged on the same machine. Test shallow lake/river, coast, waterline, optional waterfall/WMO/non-water examples and the Amberpine reference. Do not infer feature absence from a site producing no liquid draw records. A passing diagnostic authorises only the colour-snapshot producer/order seam, not the final Classic-water shader or any depth-dependent design.
+Verify in one home session: matching native appearance; the first Water candidate occurs before the first liquid draw; no likely opaque same-RT writes occur after the candidate; all attempted EndScene/StretchRect/BeginScene brackets succeed; state is preserved; reset/lost recovery releases and lazily recreates the DEFAULT-pool snapshot resource; grass/shadow/UI/AO remain intact; and off/timing performance stays unchanged on the same machine. Test shallow lake/river, coast, waterline, optional waterfall/WMO/non-water examples and the Amberpine reference. Do not infer feature absence from a site producing no liquid draw records. The per-generation reservation deliberately leaves four attempts available after one successful Reset so lazy DEFAULT-pool recreation can be proven. A passing diagnostic authorises only the colour-snapshot producer/order seam, not the final Classic-water shader or any depth-dependent design.
 
 CI uses the existing Win32/MSVC workflow, retains R5 receiver checks, and adds portable policy/hash tests plus capture-integrity tests. Deploy only a hash-pinned candidate WarcraftXL.dll. The workflow-built proxy is not the accepted fixed proxy and must not be deployed. The accepted R5 WarcraftXL.dll is the rollback, not the older DIAG9 DLL.
