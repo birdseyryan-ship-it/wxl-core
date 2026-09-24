@@ -42,4 +42,39 @@ jobs:
             r6-classic-water-acquire/
             r6-classic-water-archive-fallback/
           if-no-files-found: error
+          retention-days: 14\n
+  disassemble:
+    needs: acquire
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout exact branch commit
+        uses: actions/checkout@v4
+      - name: Download CKey-verified acquisition evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: r6-classic-water-acquire-${{ github.sha }}
+          path: .
+      - name: Extract exact DXBC permutations from verified GXSH containers
+        run: python tools/r6-water-acquire/gxsh_extract_dxbc.py r6-classic-water-archive-fallback/decoded r6-classic-water-disassembly/dxbc
+      - name: Disassemble with Microsoft D3DCompiler 47
+        run: python tools/r6-water-acquire/disassemble_dxbc.py r6-classic-water-disassembly/dxbc
+      - name: Show exact Water family assembly headers
+        run: |
+          Get-Content r6-classic-water-disassembly/DXBC_SUMMARY.txt
+          Get-Content r6-classic-water-disassembly/DISASSEMBLY_SUMMARY.txt
+          Get-ChildItem r6-classic-water-disassembly/dxbc/shaders__pixel__ps_5_0__water -Filter *.asm | ForEach-Object {
+            Write-Host "===== $($_.Name) ====="
+            Get-Content $_.FullName -TotalCount 120
+          }
+          Get-ChildItem r6-classic-water-disassembly/dxbc/shaders__vertex__vs_5_0__water -Filter *.asm | ForEach-Object {
+            Write-Host "===== $($_.Name) ====="
+            Get-Content $_.FullName -TotalCount 120
+          }
+      - name: Upload exact Classic DXBC disassembly evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: r6-classic-water-disassembly-${{ github.sha }}
+          path: r6-classic-water-disassembly/
+          if-no-files-found: error
           retention-days: 14
