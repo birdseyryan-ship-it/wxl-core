@@ -16,6 +16,12 @@ ARCHIVE_SOURCES=[
  "https://us.cdn.blizzard.com/tpr/wow/data",
 ]
 TIMEOUT=12
+CDN_CONFIG="c54b41b3195b9482ce0d3c6bf0b86cdb"
+CONFIG_SOURCES=[
+ "https://archive.wow.tools/tpr/wow/config",
+ "https://casc.wago.tools/tpr/wow/config",
+ "https://us.cdn.blizzard.com/tpr/wow/config",
+]
 
 def request(url,headers=None,max_bytes=None):
     req=urllib.request.Request(url,headers={"User-Agent":"Azeroth-Ironman-R6-Classic-Water-Archive/1",**(headers or {})})
@@ -28,6 +34,30 @@ def index_url(base,h):
     return f"{base}/{h[:2]}/{h[2:4]}/{h}.index"
 def archive_url(base,h):
     return f"{base}/{h[:2]}/{h[2:4]}/{h}"
+
+def fetch_pinned_archives():
+    errors=[]
+    suffix=f"{CDN_CONFIG[:2]}/{CDN_CONFIG[2:4]}/{CDN_CONFIG}"
+    for base in CONFIG_SOURCES:
+        url=f"{base}/{suffix}"
+        try:
+            status,hdr,data=request(url)
+            digest=hashlib.md5(data).hexdigest()
+            if status!=200:
+                errors.append(f"{url}: status={status}"); continue
+            if digest!=CDN_CONFIG:
+                errors.append(f"{url}: MD5={digest} expected={CDN_CONFIG}"); continue
+            text=data.decode("utf-8")
+            line=next((x for x in text.splitlines() if x.startswith("archives = ")),None)
+            if not line:
+                errors.append(f"{url}: archives line absent"); continue
+            archives=line.split("=",1)[1].split()
+            if len(archives)!=606 or len(set(archives))!=606 or any(len(x)!=32 for x in archives):
+                errors.append(f"{url}: invalid archive set count={len(archives)} unique={len(set(archives))}"); continue
+            return archives,{"source_url":url,"bytes":len(data),"md5":digest,"sha256":sha256(data),"count":len(archives)},errors
+        except Exception as e:
+            errors.append(f"{url}: {type(e).__name__}: {e}")
+    raise RuntimeError("pinned CDN config unavailable or invalid: "+" | ".join(errors))
 
 def fetch_index(h):
     errs=[]
@@ -75,7 +105,7 @@ def fetch_range(archive_hash,offset,size):
 def main():
     ROOT.mkdir(parents=True,exist_ok=True)
     rawdir=ROOT/"encoded"; decdir=ROOT/"decoded"; rawdir.mkdir(exist_ok=True);decdir.mkdir(exist_ok=True)
-    archives=[x.strip() for x in Path("tools/r6-water-acquire/classic_1_13_2_31650_archives.txt").read_text().splitlines() if x.strip()]
+    archives,config_authority,config_errors=fetch_pinned_archives()
     targets={ekey:(path,ckey) for path,ckey,ekey in ROWS}
     pending=set(targets)
     locations={}
@@ -130,6 +160,7 @@ def main():
              "range_failures":sum(r["status"]=="archive_range_fetch_failed" for r in results),
              "decode_failures":sum(r["status"]=="decode_or_ckey_failed" for r in results),
              "results":results,
+             "cdn_config":CDN_CONFIG,"config_authority":config_authority,"config_prior_errors":config_errors,
              "index_sources":INDEX_SOURCES,"archive_sources":ARCHIVE_SOURCES}
     (ROOT/"ARCHIVE_FALLBACK.json").write_text(json.dumps(summary,indent=2)+"\n")
     lines=[f"archives={summary['archive_count']} targets={summary['target_count']} located={summary['locations']} verified={summary['verified']} unresolved={summary['unresolved']} range_failures={summary['range_failures']} decode_failures={summary['decode_failures']}"]
