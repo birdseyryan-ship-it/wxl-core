@@ -117,6 +117,14 @@ namespace
      */
     void __fastcall hkWorldScene(void* worldFrame, void* edx)
     {
+        // R6 ordering proof: append-only event emitted at the true world-scene entry. With no
+        // subscriber this is inert; the water diagnostic uses it only while explicitly enabled.
+        if (ev::Any(ev::Event::OnWorldSceneBegin))
+        {
+            ev::WorldSceneBeginArgs begin{ gx::RawDevice() };
+            ev::Emit(ev::Event::OnWorldSceneBegin, &begin);
+        }
+
         // Taken before the pass, not after: the post-process passes run inside it and can leave a
         // surface of their own bound. A subscriber that depth-tests against whatever it finds bound
         // afterwards is testing against a surface the world never wrote to, which rejects all of its

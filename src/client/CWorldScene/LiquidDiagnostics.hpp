@@ -12,7 +12,8 @@ struct Context {
     unsigned vsWriteCalls=0,psWriteCalls=0,invalidWriteRanges=0;
 };
 using Boundary=void(*)(bool begin,const Context&) noexcept;
-bool Install(Boundary callback); // Registers with existing hook chains; caller enables normal batch.
+using MaterialBegin=void(*)(const Context&) noexcept;
+bool Install(Boundary boundaryCallback, MaterialBegin materialBeginCallback); // Existing chains; caller enables normal batch.
 const Context* Current() noexcept;
 void FloatWrite(bool pixel,unsigned first,unsigned count) noexcept;
 bool Read(const void* address,void* output,size_t bytes) noexcept;

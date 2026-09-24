@@ -8,13 +8,13 @@ import hashlib
 import json
 from pathlib import Path
 
-EVENTS = {'session','device','boundary','shader','draw','summary','lost','reset','world_leave','shutdown','error'}
+EVENTS = {'session','device','boundary','shader','draw','world_scene','water_candidate','snapshot_attempt','post_water_draw','summary','lost','reset','world_leave','shutdown','error'}
 
 def audit(path, extract=None):
     path = Path(path)
     if path.stat().st_size > 32 * 1024 * 1024:
         raise ValueError('capture exceeds hard 32 MiB ceiling')
-    seen = {}; counts = {}; draws = []; last_sequence = -1; limits = None
+    seen = {}; counts = {}; draws = []; snapshots = []; last_sequence = -1; limits = None
     with path.open(encoding='utf-8') as f:
         for number, line in enumerate(f, 1):
             if len(line) > 262144:
@@ -29,8 +29,10 @@ def audit(path, extract=None):
             last_sequence = r['sequence']; event = r['event']; counts[event] = counts.get(event, 0) + 1
             if event == 'session':
                 limits = r
-                if r.get('replacement_supported') is not False or r.get('copy_supported') is not False:
-                    raise ValueError('unexpected mutating mode in native-preserving candidate')
+                if r.get('replacement_supported') is not False:
+                    raise ValueError('replacement must remain disabled in native-preserving candidate')
+                if r.get('copy_supported') not in (False, True):
+                    raise ValueError('copy support declaration missing')
             if event == 'shader':
                 key = (r['generation'], r['id'])
                 if key in seen and seen[key] != r['sha256']:
@@ -63,10 +65,31 @@ def audit(path, extract=None):
                         if c[stage+'_float_hr'] >= 0 and len(bytes.fromhex(c[stage+'_float_le_hex'])) != n*16:
                             raise ValueError('constant capture length mismatch')
                 draws.append(r)
+            if event == 'snapshot_attempt':
+                if limits is None:
+                    raise ValueError('snapshot attempt precedes session header')
+                if r.get('replacement_allowed') is not False:
+                    raise ValueError('snapshot attempt is not explicitly native-only')
+                if r.get('attempted') is True:
+                    cap = limits.get('copy_attempt_cap')
+                    index = r.get('attempt_index')
+                    if not isinstance(cap, int) or cap < 0 or not isinstance(index, int) or not 1 <= index <= cap:
+                        raise ValueError('snapshot attempt exceeds declared cap')
+                    if r.get('snapshot_valid') is True:
+                        for key in ('end_scene_hr','stretch_rect_hr','begin_scene_hr'):
+                            if not isinstance(r.get(key), int) or r[key] < 0:
+                                raise ValueError(f'valid snapshot has failing {key}')
+                        for key in ('source_destination_distinct','descriptor_compatible','state_preserved'):
+                            if r.get(key) is not True:
+                                raise ValueError(f'valid snapshot lacks {key}')
+                    snapshots.append(r)
+                elif r.get('attempted') is not False:
+                    raise ValueError('snapshot record lacks attempted boolean')
     if limits is None: raise ValueError('session header missing')
     if len(draws) > limits['max_draws']: raise ValueError('process draw ceiling exceeded')
+    if len(snapshots) > limits.get('copy_attempt_cap', 0): raise ValueError('process snapshot ceiling exceeded')
     return {'file':str(path),'sha256':hashlib.sha256(path.read_bytes()).hexdigest(),
-            'events':counts,'draws':len(draws),'shader_identities':len(seen),
+            'events':counts,'draws':len(draws),'snapshots':len(snapshots),'shader_identities':len(seen),
             'classes':sorted({r['material_class'] for r in draws}),
             'providers':sorted({r['provider'] for r in draws}),
             'limits':'No live visual/performance validation or spare-register conclusion follows from this audit.'}

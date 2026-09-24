@@ -1,6 +1,6 @@
 # R6 native-preserving diagnostic candidate
 
-This candidate observes Wrath liquid rendering. It contains **no Classic replacement shader, refraction, reflection pass, ripple simulation or scene copy**. R5 shadows, R4 grass/environment, R3 AO/SMAA, the fixed proxy and Wow.exe remain the baseline. No live validation is claimed.
+This candidate is the bounded **pre-Water scene-snapshot and draw-order proof** for R6. It still contains **no Classic replacement shader, refraction, reflection pass, ripple simulation or depth copy**. When explicitly armed, it may perform up to eight colour-only same-frame render-target resolves solely to prove the producer/order seam. Native Wrath water is always rendered. R5 shadows, R4 grass/environment, R3 AO/SMAA, the fixed proxy and Wow.exe remain the baseline. No live validation is claimed before the home test.
 
 ## Activation
 
@@ -13,15 +13,15 @@ All R6 work defaults off. Set `WXL_CLASSIC_WATER_DIAG=1` to enable. Invalid sett
 | WXL_CLASSIC_WATER_DIAG_SAMPLES | 3 | 1–4 samples per profile, repeated samples at least 180 presented frames apart |
 | WXL_CLASSIC_WATER_DIAG_MAX_DRAWS | 256 | 1–512 admitted draw records across the process, including resets |
 | WXL_CLASSIC_WATER_DIAG_MAX_MIB | 16 | 1–32 MiB hard output ceiling; 2 MiB pending CPU queue; ≤256 KiB written per Present |
-| WXL_CLASSIC_WATER_DIAG_COPY | 0 | A value of 1 is explicitly rejected as unsupported; native rendering continues |
+| WXL_CLASSIC_WATER_DIAG_COPY | 0 | 0 observes ordering only; 1 arms the bounded colour-only pre-Water snapshot proof (maximum 8 attempts); native rendering still continues |
 
-No setter/replacement flag exists. Do not interpret COPY=1 as a completed proof. Safe scene bracketing, opaque ordering and depth resolve remain unresolved. Heavy capture is unsuitable for performance measurements; use timing and off for those comparisons.
+No setter/replacement flag exists. COPY=1 is diagnostic only and cannot suppress or replace a native draw. It proves nothing until the emitted snapshot/order evidence passes audit and the live reset/regression checks. Depth resolve remains deliberately out of scope. Heavy capture is unsuitable for performance measurements; use timing and off for those comparisons.
 
 ## Hooks and ownership
 
-`src/client/CWorldScene/LiquidDiagnostics.cpp` joins existing MinHook chains at priority 100. The original event ABI and Render.cpp are unchanged. Native pass, Water, WaterNoSpec, ProcWater, Magma and terrain/WMO provider scopes identify context before a separate chained D3D9 DrawIndexedPrimitive observer captures final state. The existing grass predecessor remains in the draw chain; R6 never wraps SetVertexShader or SetPixelShader.
+`src/client/CWorldScene/LiquidDiagnostics.cpp` joins existing MinHook chains at priority 100. A new append-only `OnWorldSceneBegin` event is emitted from the already-hooked world-scene seam immediately before the native world renderer; existing event IDs are unchanged. Native pass, Water, WaterNoSpec, ProcWater, Magma and terrain/WMO provider scopes identify context. The first verified base-Water material entry in an outer world scene is the only snapshot producer candidate, before that material calls its native renderer. The existing liquid-scoped DrawIndexedPrimitive seam remains the final replacement-eligibility/consumer observation point. The existing grass predecessor remains in the draw chain; R6 never wraps SetVertexShader or SetPixelShader.
 
-The DIP and optional float-constant setter wrappers are installed from the native EndScene event, after existing static subscribers such as grass. The prior DIP pointer and module/RVA are recorded. Every native draw and float-setter is forwarded once with its original arguments and HRESULT. Capture exceptions quarantine observation. Actual downstream hook ordering still requires live confirmation; this diagnostic never authorises replacement merely from its discovery label.
+The four D3D9 draw-entry wrappers (`DrawPrimitive`, `DrawIndexedPrimitive`, `DrawPrimitiveUP`, `DrawIndexedPrimitiveUP`) and optional float-constant setter wrappers are installed from the native EndScene event, after existing static subscribers such as grass. Prior pointers are preserved; every native draw and float-setter is forwarded exactly once with its original arguments and HRESULT. A global draw ordinal plus bounded post-Water state probes test whether likely opaque colour/depth-writing work still occurs on the same RT0 after the candidate. Capture exceptions quarantine observation. Actual downstream hook ordering still requires live confirmation; this diagnostic never authorises replacement merely from its discovery label.
 
 In full mode, successful VS/PS float writes **during native material scope** are marked. Writes outside that scope and integer/bool write calls are not traced. Final float/int/bool state is separately queried. Static shader reads and relative addressing require offline bytecode analysis. No constant/sampler is declared free.
 
@@ -33,11 +33,15 @@ Output: `Logs/r6-water-<process>-<tick>.ndjson`. Every record contains schema=1,
 
 | Event | Payload / limits |
 | --- | --- |
-| session | Executable authority, effective mode/limits, unsupported-copy/replacement declarations; Classic target controls are labelled target metadata, not live Wrath CVar values |
-| device | First-observed/reset device, prior draw-owner module/RVA, caps, MSAA and present parameters; no GPU targets allocated |
+| session | Executable authority, effective mode/limits, `copy_supported=true`, `replacement_supported=false`, and the eight-attempt copy ceiling; Classic target controls are labelled target metadata, not live Wrath CVar values |
+| device | First-observed/reset device, prior draw-owner module/RVA, caps, MSAA and present parameters; the diagnostic snapshot target is allocated lazily only after a verified Water candidate |
 | boundary | Before/after one native liquid invocation, pass, instance count, RT0/depth descriptors, viewport, phase; ≤128 records process-wide |
 | shader | Final observed VS/PS object, process-unique ID, SHA256, size/version and full-mode exact little-endian bytecode hex; at most 128 simultaneously retained shader objects; ≤64 KiB each |
-| draw | Material/settings/provider/pass; shader SHA256s; declaration/FVF; topology/streams/indices; render states/hash; RT/depth/viewport; full-mode 16 pixel and 4 vertex texture/sampler stages and constant blocks |
+| draw | Liquid-scoped material/settings/provider/pass; shader SHA256s; declaration/FVF; topology/streams/indices; render states/hash; RT/depth/viewport; full-mode 16 pixel and 4 vertex texture/sampler stages and constant blocks |
+| world_scene | Outer world-scene begin/end serial, draw ordinals, target/state envelope, first/last liquid ordinal, post-Water counts and provisional ordering result |
+| water_candidate | First verified base-Water material entry for the outer world-scene serial; records producer ordinal and whether earlier liquid draws already occurred |
+| snapshot_attempt | At most 8 process-wide: direct-original EndScene/StretchRect/BeginScene HRESULTs, CPU bracket ticks, source/destination descriptors and state-preservation result; `replacement_allowed=false` |
+| post_water_draw | At most 16 detailed records from a bounded 128-probe window after the candidate, classifying likely late opaque same-RT writes versus unclassified work |
 | summary | Counts, failures, profile admissions, queue/output/drop counts and CPU ticks/frequency |
 | lost/reset/world_leave/shutdown | Lifecycle evidence; invalidation and final pending/drop counts |
 
@@ -49,8 +53,8 @@ Run `python tools/r6-water-check/audit_capture.py <capture.ndjson> --extract <ne
 
 ## Safety / remaining live gates
 
-The module makes no D3D render-state changes: no scene splitting, target binding, constants substitution, replacement draw or render-target allocation. Therefore it does not introduce a state-restoration transaction. A future copy/replacement must supply and test that transaction separately. Readback and GPU queries are not used.
+With COPY=0 the module remains observational. With COPY=1, the only mutation is a bounded diagnostic scene bracket: retain explicit COM references to current RT0/depth and state, call the direct-original `EndScene`, `StretchRect` RT0 into an R6-owned single-sample `D3DPOOL_DEFAULT` render-target texture of matching size/format, then call `BeginScene` exactly once when EndScene succeeded. The snapshot texture is never bound or sampled by this candidate. RT0/depth/viewport and relevant render state are re-probed afterward; any BeginScene failure quarantines the diagnostic. There is no target binding, constant substitution, replacement draw, readback, GPU query or depth copy.
 
-Verify in one eventual home session: matching native appearance; material/provider coverage; final shader identities; constants written versus read; target/MSAA descriptors and pass order; reset recovery; grass/shadow/UI/AO preservation; off/timing performance on the unchanged machine. Test shallow lake/river, coast, waterline, optional waterfall/WMO/non-water examples and the Amberpine reference. Do not infer feature absence from a site producing no liquid draw records.
+Verify in one home session: matching native appearance; the first Water candidate occurs before the first liquid draw; no likely opaque same-RT writes occur after the candidate; all attempted EndScene/StretchRect/BeginScene brackets succeed; state is preserved; reset/lost recovery releases and lazily recreates the DEFAULT-pool snapshot resource; grass/shadow/UI/AO remain intact; and off/timing performance stays unchanged on the same machine. Test shallow lake/river, coast, waterline, optional waterfall/WMO/non-water examples and the Amberpine reference. Do not infer feature absence from a site producing no liquid draw records. A passing diagnostic authorises only the colour-snapshot producer/order seam, not the final Classic-water shader or any depth-dependent design.
 
 CI uses the existing Win32/MSVC workflow, retains R5 receiver checks, and adds portable policy/hash tests plus capture-integrity tests. Deploy only a hash-pinned candidate WarcraftXL.dll. The workflow-built proxy is not the accepted fixed proxy and must not be deployed. The accepted R5 WarcraftXL.dll is the rollback, not the older DIAG9 DLL.

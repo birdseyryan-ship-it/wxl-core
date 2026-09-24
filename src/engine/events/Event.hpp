@@ -64,6 +64,8 @@ namespace wxl::events
         OnGrassWind,     // grass wind integrator advanced this frame (GrassWindArgs)
         OnAdtHeightBlend,// a terrain PS permutation was patched for height blending (AdtHeightBlendArgs)
         OnM2NativeLoad,  // a modern MD21 model was direct-filled by the native reader (M2NativeLoadArgs)
+        // R6 appends this event so every pre-existing numeric event ID remains unchanged.
+        OnWorldSceneBegin, // world-scene pass is about to draw               (WorldSceneBeginArgs)
         Count
     };
 
@@ -106,6 +108,11 @@ namespace wxl::events
     struct DeviceResetArgs    { void* device; void* params; };
     /** @brief Args for OnWorldRender. */
     struct WorldRenderArgs    { void* device; };
+    /**
+     * @brief Args for OnWorldSceneBegin, emitted immediately before the native world-scene pass.
+     *        R6 uses this as a read-only ordering marker; subscribers query any D3D state synchronously.
+     */
+    struct WorldSceneBeginArgs { void* device; };
     /**
      * @brief Args for OnWorldRenderEnd: the world -> UI boundary of the frame. A subscriber draws
      *        post-world effects here, before the client renders the interface on top.

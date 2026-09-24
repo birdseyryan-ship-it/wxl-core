@@ -14,6 +14,7 @@ namespace gx=wxl::offsets::engine::gx;
 thread_local Context* current=nullptr;
 std::atomic<uint64_t> sequence{0};
 Boundary boundary=nullptr;
+MaterialBegin materialBegin=nullptr;
 gx::LiquidRenderPassFn passOriginal=nullptr;
 liq::MaterialWaterRenderFn waterOriginal=nullptr,noSpecOriginal=nullptr,procOriginal=nullptr,magmaOriginal=nullptr;
 liq::GeomGetBuffersFn terrainOriginal=nullptr,wmoOriginal=nullptr;
@@ -31,7 +32,11 @@ void Material(Family family,liq::MaterialWaterRenderFn original,void* self,void*
     Context c=*current;c.family=family;c.provider=Provider::Unknown;c.material=self;c.geometry=geom;
     c.animation=anim;c.camera=camera;c.world=world;c.sphere=sphere;c.settings=settings;
     c.vsWrites.fill(0);c.psWrites.fill(0);c.vsWriteCalls=c.psWriteCalls=c.invalidWriteRanges=0;
-    Scope scope(c);original(self,edx,env,geom,anim,camera,world,sphere,settings);
+    Scope scope(c);
+    // R6 snapshot proof fires only at concrete base-Water material entry, before the native
+    // material function can issue its first draw. No callback exists when diagnostics are off.
+    if(family==Family::Water&&materialBegin)materialBegin(c);
+    original(self,edx,env,geom,anim,camera,world,sphere,settings);
 }
 #define R6_MATERIAL(name,family,original) \
 void __fastcall name(void* self,void* edx,void* env,void* geom,void* anim,const float* camera,const float* world,const float* sphere,void* settings) { \
@@ -59,7 +64,7 @@ void FloatWrite(bool pixel,unsigned first,unsigned count) noexcept {
     if(pixel){++current->psWriteCalls;if(!MarkRange(current->psWrites,first,count))++current->invalidWriteRanges;}
     else {++current->vsWriteCalls;if(!MarkRange(current->vsWrites,first,count))++current->invalidWriteRanges;}
 }
-bool Install(Boundary cb) {
+bool Install(Boundary cb, MaterialBegin mb) {
     struct Gate {uintptr_t address;std::array<uint8_t,16> bytes;};
     static const Gate gates[]={
         {gx::kLiquidRenderPass, {0x55, 0x8b, 0xec, 0x81, 0xec, 0x18, 0x01, 0x00, 0x00, 0x53, 0x56, 0x57, 0x8b, 0xd9, 0x8d, 0xb5}},
@@ -73,7 +78,7 @@ bool Install(Boundary cb) {
     for(const auto& g:gates) {std::array<uint8_t,16> actual{};
         if(!Read(reinterpret_cast<const void*>(g.address),actual.data(),actual.size())||actual!=g.bytes){
             WLOG_ERROR("r6-water: native hook byte gate failed at %08X; diagnostics disabled",unsigned(g.address));return false;}}
-    boundary=cb;bool ok=true;
+    boundary=cb;materialBegin=mb;bool ok=true;
     ok &= wxl::hook::Install("R6.LiquidScope",gx::kLiquidRenderPass,&Pass,&passOriginal,100);
     ok &= wxl::hook::Install("R6.WaterContext",liq::kMaterialWaterRender,&Water,&waterOriginal,100);
     ok &= wxl::hook::Install("R6.NoSpecContext",liq::kMaterialWaterNoSpecRender,&NoSpec,&noSpecOriginal,100);
@@ -81,6 +86,6 @@ bool Install(Boundary cb) {
     ok &= wxl::hook::Install("R6.MagmaContext",liq::kMaterialMagmaRender,&Magma,&magmaOriginal,100);
     ok &= wxl::hook::Install("R6.TerrainLiquid",liq::kChunkGeomGetBuffers,&Terrain,&terrainOriginal,100);
     ok &= wxl::hook::Install("R6.WmoLiquid",liq::kMeshGeomGetBuffers,&Wmo,&wmoOriginal,100);
-    if(!ok)boundary=nullptr;return ok;
+    if(!ok){boundary=nullptr;materialBegin=nullptr;}return ok;
 }
 }
