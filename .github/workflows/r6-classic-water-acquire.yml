@@ -28,11 +28,18 @@ jobs:
       - name: Show acquisition summary
         if: always()
         run: cat r6-classic-water-acquire/SUMMARY.txt
+      - name: Resolve absent loose EKeys through pinned archive indices
+        run: python3 tools/r6-water-acquire/fetch_classic_water_archives.py
+      - name: Show archive fallback summary
+        if: always()
+        run: cat r6-classic-water-archive-fallback/ARCHIVE_FALLBACK_SUMMARY.txt
       - name: Upload acquisition evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: r6-classic-water-acquire-${{ github.sha }}
-          path: r6-classic-water-acquire/
+          path: |
+            r6-classic-water-acquire/
+            r6-classic-water-archive-fallback/
           if-no-files-found: error
           retention-days: 14
