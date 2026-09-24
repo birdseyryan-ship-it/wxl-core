@@ -51,4 +51,8 @@ class CaptureChecks(unittest.TestCase):
         r=self.fixture()
         r.append(dict(r[0],event='snapshot_attempt',sequence=4,replacement_allowed=False,attempted=False,reason='source_rt_unavailable'))
         self.assertEqual(self.run_records(r)['snapshots'],0)
+    def test_snapshot_record_helper_is_not_recursive(self):
+        source=(Path(__file__).resolve().parents[2]/'modules'/'wxl-modern-render'/'src'/'water'/'WaterDiagnostics.cpp').read_text()
+        self.assertIn('Json SnapshotRecord(){auto j=Record("snapshot_attempt")',source)
+        self.assertNotIn('Json SnapshotRecord(){auto j=SnapshotRecord()',source)
 if __name__=='__main__':unittest.main()

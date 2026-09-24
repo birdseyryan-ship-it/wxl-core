@@ -280,7 +280,7 @@ void RecordPostWater(IDirect3DDevice9* d,const char* api,uint64_t ordinal){
     j.Str("vs_sha256_if_cached",KnownShader(vs.p));j.Str("ps_sha256_if_cached",KnownShader(ps.p));
     Enqueue(std::move(j));
 }
-Json SnapshotRecord(){auto j=SnapshotRecord();j.Bool("replacement_allowed",false);return j;}
+Json SnapshotRecord(){auto j=Record("snapshot_attempt");j.Bool("replacement_allowed",false);return j;}
 uint64_t TrackDraw(IDirect3DDevice9* d,bool liquidScope,unsigned apiIndex,const char* api){
     const uint64_t ordinal=++globalDrawOrdinal;if(apiIndex<4)++drawApiCounts[apiIndex];
     if(worldSceneDepth!=1||!CanInspect(d))return ordinal;
