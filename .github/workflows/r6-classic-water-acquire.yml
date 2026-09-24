@@ -1,0 +1,38 @@
+name: R6 Classic Water Asset Acquisition
+
+on:
+  push:
+    branches:
+      - gfx-r6-water-diagnostics
+    paths:
+      - '.github/workflows/r6-classic-water-acquire.yml'
+      - 'tools/r6-water-acquire/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  acquire:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout exact branch commit
+        uses: actions/checkout@v4
+      - name: Show authority
+        run: |
+          echo "commit=$GITHUB_SHA"
+          git status --short --branch
+      - name: Fetch and verify exact Classic 1.13.2 water shader objects
+        run: python3 tools/r6-water-acquire/fetch_classic_water.py
+      - name: Show acquisition summary
+        if: always()
+        run: cat r6-classic-water-acquire/SUMMARY.txt
+      - name: Upload acquisition evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r6-classic-water-acquire-${{ github.sha }}
+          path: r6-classic-water-acquire/
+          if-no-files-found: error
+          retention-days: 14
