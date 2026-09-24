@@ -78,15 +78,23 @@ thread_local bool inspecting=false;
 IDirect3DTexture9* snapshotTexture=nullptr;
 IDirect3DSurface9* snapshotSurface=nullptr;
 D3DSURFACE_DESC snapshotDesc{};
+// R6 depth-transport proof owns separate DEFAULT-pool resources. It reuses the
+// frozen R3-proven two-stage transfer shape but not R3's resource or timing.
+IDirect3DTexture9* snapshotDepthTexture=nullptr;
+IDirect3DSurface9* snapshotDepthSurface=nullptr;
+IDirect3DSurface9* snapshotDepthPlainSurface=nullptr;
+D3DSURFACE_DESC snapshotDepthDesc{},snapshotDepthPlainDesc{};
+constexpr D3DFORMAT kIntz=static_cast<D3DFORMAT>(MAKEFOURCC('I','N','T','Z'));
 uint64_t worldSceneSerial=0,globalDrawOrdinal=0,sceneBeginOrdinal=0,waterCandidateOrdinal=0;
 uint64_t firstLiquidOrdinal=0,lastLiquidOrdinal=0,liquidDrawsScene=0;
 uint64_t postWaterNonLiquid=0,postWaterLikelyOpaque=0,postWaterUnclassified=0;
 uint64_t drawApiCounts[4]{},drawApiFailures[4]{};
 unsigned worldSceneDepth=0,postWaterProbed=0,postWaterRecords=0;
-bool waterCandidateSeen=false,snapshotValid=false;
+bool waterCandidateSeen=false,snapshotValid=false,depthSnapshotValid=false;
 uint64_t snapshotSerial=0,snapshotFrame=0,snapshotProducerOrdinal=0;
+uint64_t depthSnapshotSerial=0,depthSnapshotFrame=0,depthSnapshotProducerOrdinal=0;
 uintptr_t snapshotSourceRtToken=0;
-unsigned snapshotAttempts=0,snapshotSuccesses=0,snapshotGenerationAttempts=0;
+unsigned snapshotAttempts=0,snapshotSuccesses=0,depthSnapshotSuccesses=0,snapshotGenerationAttempts=0;
 bool snapshotCapReported=false,snapshotGenerationCapReported=false;
 constexpr unsigned kSnapshotAttemptLimit=8,kSnapshotAttemptsPerGeneration=4,kPostWaterProbeLimit=128,kPostWaterRecordLimit=16;
 
@@ -99,9 +107,14 @@ void Failure() noexcept {quarantined=true;++captureErrors;if(!errorLogged){WLOG_
 bool CanInspect(IDirect3DDevice9* d) noexcept{return ready&&!lost&&!quarantined&&d==device&&GetCurrentThreadId()==renderThread;}
 void ReleaseShaders() noexcept{for(auto& s:shaders)if(s.object)s.object->Release();shaders.clear();}
 template<class T> void Drop(T*& p) noexcept{if(p){p->Release();p=nullptr;}}
+void ReleaseDepthSnapshot() noexcept{
+    Drop(snapshotDepthPlainSurface);Drop(snapshotDepthSurface);Drop(snapshotDepthTexture);
+    snapshotDepthDesc={};snapshotDepthPlainDesc={};depthSnapshotValid=false;
+    depthSnapshotSerial=0;depthSnapshotFrame=0;depthSnapshotProducerOrdinal=0;
+}
 void ReleaseSnapshot() noexcept{
     Drop(snapshotSurface);Drop(snapshotTexture);snapshotDesc={};snapshotValid=false;snapshotSerial=0;snapshotFrame=0;
-    snapshotProducerOrdinal=0;snapshotSourceRtToken=0;
+    snapshotProducerOrdinal=0;snapshotSourceRtToken=0;ReleaseDepthSnapshot();
 }
 struct Probe {
     Com<IDirect3DSurface9> rt,ds;Com<IDirect3DVertexShader9> vs;Com<IDirect3DPixelShader9> ps;
@@ -143,6 +156,37 @@ bool EnsureSnapshotTarget(IDirect3DDevice9* d,const D3DSURFACE_DESC& src,HRESULT
     if(FAILED(levelHr)||!snapshotSurface){ReleaseSnapshot();return false;}
     HRESULT descHr=snapshotSurface->GetDesc(&snapshotDesc);
     if(FAILED(descHr)||snapshotDesc.Width!=src.Width||snapshotDesc.Height!=src.Height||snapshotDesc.Format!=src.Format||snapshotDesc.MultiSampleType!=D3DMULTISAMPLE_NONE){ReleaseSnapshot();return false;}
+    return true;
+}
+struct DepthTargetStatus{
+    HRESULT intzCreate=D3DERR_INVALIDCALL,intzLevel=D3DERR_INVALIDCALL,intzDesc=D3DERR_INVALIDCALL;
+    HRESULT plainCreate=D3DERR_INVALIDCALL,plainDesc=D3DERR_INVALIDCALL;
+};
+bool EnsureSnapshotDepthTarget(IDirect3DDevice9* d,const D3DSURFACE_DESC& src,DepthTargetStatus& st){
+    if(snapshotDepthTexture&&snapshotDepthSurface&&snapshotDepthPlainSurface&&
+       snapshotDepthDesc.Width==src.Width&&snapshotDepthDesc.Height==src.Height&&
+       snapshotDepthDesc.Format==kIntz&&snapshotDepthDesc.MultiSampleType==D3DMULTISAMPLE_NONE&&
+       snapshotDepthPlainDesc.Width==src.Width&&snapshotDepthPlainDesc.Height==src.Height&&
+       snapshotDepthPlainDesc.Format==src.Format&&snapshotDepthPlainDesc.MultiSampleType==D3DMULTISAMPLE_NONE){
+        st.intzCreate=st.intzLevel=st.intzDesc=st.plainCreate=st.plainDesc=S_OK;return true;
+    }
+    ReleaseDepthSnapshot();
+    st.intzCreate=d->CreateTexture(src.Width,src.Height,1,D3DUSAGE_DEPTHSTENCIL,kIntz,D3DPOOL_DEFAULT,&snapshotDepthTexture,nullptr);
+    if(FAILED(st.intzCreate)||!snapshotDepthTexture){ReleaseDepthSnapshot();return false;}
+    st.intzLevel=snapshotDepthTexture->GetSurfaceLevel(0,&snapshotDepthSurface);
+    if(FAILED(st.intzLevel)||!snapshotDepthSurface){ReleaseDepthSnapshot();return false;}
+    st.intzDesc=snapshotDepthSurface->GetDesc(&snapshotDepthDesc);
+    if(FAILED(st.intzDesc)||snapshotDepthDesc.Width!=src.Width||snapshotDepthDesc.Height!=src.Height||
+       snapshotDepthDesc.Format!=kIntz||snapshotDepthDesc.MultiSampleType!=D3DMULTISAMPLE_NONE){
+        ReleaseDepthSnapshot();return false;
+    }
+    st.plainCreate=d->CreateDepthStencilSurface(src.Width,src.Height,src.Format,D3DMULTISAMPLE_NONE,0,FALSE,&snapshotDepthPlainSurface,nullptr);
+    if(FAILED(st.plainCreate)||!snapshotDepthPlainSurface){ReleaseDepthSnapshot();return false;}
+    st.plainDesc=snapshotDepthPlainSurface->GetDesc(&snapshotDepthPlainDesc);
+    if(FAILED(st.plainDesc)||snapshotDepthPlainDesc.Width!=src.Width||snapshotDepthPlainDesc.Height!=src.Height||
+       snapshotDepthPlainDesc.Format!=src.Format||snapshotDepthPlainDesc.MultiSampleType!=D3DMULTISAMPLE_NONE){
+        ReleaseDepthSnapshot();return false;
+    }
     return true;
 }
 std::string KnownShader(IUnknown* object){if(!object)return "null";for(const auto& s:shaders)if(s.object==object&&s.info.valid)return Hex(s.info.hash);return "UNKNOWN";}
@@ -302,14 +346,17 @@ uint64_t TrackDraw(IDirect3DDevice9* d,bool liquidScope,unsigned apiIndex,const 
 void SnapshotAtWater(const native::Context& c) noexcept{
     if(c.family!=Family::Water||!ready||!device||!CanInspect(device)||worldSceneDepth!=1||waterCandidateSeen)return;
     try{
-        waterCandidateSeen=true;snapshotValid=false;phase="first_water_material_begin";
+        waterCandidateSeen=true;snapshotValid=false;depthSnapshotValid=false;phase="first_water_material_begin";
         const uint64_t candidateOrdinal=globalDrawOrdinal;waterCandidateOrdinal=candidateOrdinal;
         Probe before;FillProbe(device,before);
-        D3DSURFACE_DESC srcDesc{};HRESULT srcDescHr=before.rt.p?before.rt.p->GetDesc(&srcDesc):D3DERR_INVALIDCALL;
+        D3DSURFACE_DESC srcDesc{},depthSrcDesc{};
+        HRESULT srcDescHr=before.rt.p?before.rt.p->GetDesc(&srcDesc):D3DERR_INVALIDCALL;
+        HRESULT depthSrcDescHr=before.ds.p?before.ds.p->GetDesc(&depthSrcDesc):D3DERR_INVALIDCALL;
         snapshotSourceRtToken=reinterpret_cast<uintptr_t>(before.rt.p);
         auto candidate=Record("water_candidate");candidate.Num("invocation",c.invocation);candidate.Num("pass",c.pass);candidate.Num("scope_depth",c.depth);
         candidate.Num("producer_draw_ordinal",candidateOrdinal);candidate.Num("scene_begin_draw_ordinal",sceneBeginOrdinal);candidate.Num("liquid_draws_before_candidate",liquidDrawsScene);
-        candidate.Raw("state_before",ProbeJson(before));candidate.Bool("copy_requested",config.copyRequested);candidate.Num("snapshot_attempts_before",snapshotAttempts);Enqueue(std::move(candidate));
+        candidate.Raw("state_before",ProbeJson(before));candidate.Bool("copy_requested",config.copyRequested);candidate.Bool("depth_copy_requested",config.depthCopyRequested);
+        candidate.Num("snapshot_attempts_before",snapshotAttempts);Enqueue(std::move(candidate));
 
         if(!config.copyRequested)return;
         if(liquidDrawsScene!=0){auto j=SnapshotRecord();j.Bool("attempted",false);j.Str("reason","prior_liquid_draw_seen");j.Num("liquid_draws_before_candidate",liquidDrawsScene);Enqueue(std::move(j));return;}
@@ -318,17 +365,36 @@ void SnapshotAtWater(const native::Context& c) noexcept{
         if(FAILED(before.rtHr)||!before.rt.p||FAILED(srcDescHr)){auto j=SnapshotRecord();j.Bool("attempted",false);j.Str("reason","source_rt_unavailable");j.Num("rt_hr",int32_t(before.rtHr));j.Num("desc_hr",int32_t(srcDescHr));Enqueue(std::move(j));return;}
 
         HRESULT createHr=S_OK,levelHr=S_OK;const bool targetOk=EnsureSnapshotTarget(device,srcDesc,createHr,levelHr);
-        // EnsureSnapshotTarget may release an older owned target and clear the stamp; restore this candidate token afterwards.
+        // EnsureSnapshotTarget may release owned targets and clear stamps; restore this candidate token afterwards.
         snapshotSourceRtToken=reinterpret_cast<uintptr_t>(before.rt.p);
         const bool distinct=targetOk&&snapshotSurface!=before.rt.p;
         const bool compatible=targetOk&&snapshotDesc.Width==srcDesc.Width&&snapshotDesc.Height==srcDesc.Height&&snapshotDesc.Format==srcDesc.Format&&snapshotDesc.MultiSampleType==D3DMULTISAMPLE_NONE;
         if(!targetOk||!distinct||!compatible){auto j=SnapshotRecord();j.Bool("attempted",false);j.Str("reason","owned_target_unavailable_or_incompatible");j.Num("create_hr",int32_t(createHr));j.Num("surface_level_hr",int32_t(levelHr));j.Bool("distinct",distinct);j.Bool("compatible",compatible);j.Raw("source",Surface(before.rt.p,before.rtHr));j.Raw("destination",Surface(snapshotSurface,targetOk?S_OK:D3DERR_INVALIDCALL));Enqueue(std::move(j));return;}
 
+        DepthTargetStatus depthTarget{};
+        bool depthTargetOk=!config.depthCopyRequested;
+        if(config.depthCopyRequested){
+            depthTargetOk=SUCCEEDED(before.dsHr)&&before.ds.p&&SUCCEEDED(depthSrcDescHr)&&EnsureSnapshotDepthTarget(device,depthSrcDesc,depthTarget);
+            if(!depthTargetOk){
+                auto j=SnapshotRecord();j.Bool("attempted",false);j.Str("reason","depth_source_or_target_unavailable");
+                j.Num("depth_get_hr",int32_t(before.dsHr));j.Num("depth_desc_hr",int32_t(depthSrcDescHr));
+                j.Num("depth_intz_create_hr",int32_t(depthTarget.intzCreate));j.Num("depth_intz_level_hr",int32_t(depthTarget.intzLevel));
+                j.Num("depth_intz_desc_hr",int32_t(depthTarget.intzDesc));j.Num("depth_plain_create_hr",int32_t(depthTarget.plainCreate));
+                j.Num("depth_plain_desc_hr",int32_t(depthTarget.plainDesc));j.Raw("depth_source",Surface(before.ds.p,before.dsHr));
+                Enqueue(std::move(j));return;
+            }
+        }
+
         ++snapshotAttempts;++snapshotGenerationAttempts;LARGE_INTEGER qa{},qb{};QueryPerformanceCounter(&qa);
         const HRESULT endHr=static_cast<HRESULT>(wxl::runtime::render::EndSceneForPostProcess(device));
-        HRESULT stretchHr=D3DERR_INVALIDCALL,beginHr=D3DERR_INVALIDCALL;
+        HRESULT stretchHr=D3DERR_INVALIDCALL,depthStage1Hr=D3DERR_INVALIDCALL,depthStage2Hr=D3DERR_INVALIDCALL,beginHr=D3DERR_INVALIDCALL;
         if(SUCCEEDED(endHr)){
             stretchHr=device->StretchRect(before.rt.p,nullptr,snapshotSurface,nullptr,D3DTEXF_NONE);
+            if(config.depthCopyRequested){
+                depthStage1Hr=device->StretchRect(before.ds.p,nullptr,snapshotDepthPlainSurface,nullptr,D3DTEXF_NONE);
+                if(SUCCEEDED(depthStage1Hr))
+                    depthStage2Hr=device->StretchRect(snapshotDepthPlainSurface,nullptr,snapshotDepthSurface,nullptr,D3DTEXF_NONE);
+            }
             // Balance every successful direct-original EndScene exactly once, including copy failure.
             beginHr=device->BeginScene();
         }
@@ -336,14 +402,25 @@ void SnapshotAtWater(const native::Context& c) noexcept{
         Probe after;bool statePreserved=false;
         if(SUCCEEDED(beginHr)){FillProbe(device,after);statePreserved=SameProbe(before,after);}
         const bool success=SUCCEEDED(endHr)&&SUCCEEDED(stretchHr)&&SUCCEEDED(beginHr)&&statePreserved;
+        const bool depthSuccess=config.depthCopyRequested&&success&&SUCCEEDED(depthStage1Hr)&&SUCCEEDED(depthStage2Hr);
         if(success){snapshotValid=true;snapshotSerial=worldSceneSerial;snapshotFrame=frame;snapshotProducerOrdinal=candidateOrdinal;++snapshotSuccesses;}
         else{snapshotValid=false;snapshotSerial=0;snapshotFrame=0;snapshotProducerOrdinal=0;}
+        if(depthSuccess){depthSnapshotValid=true;depthSnapshotSerial=worldSceneSerial;depthSnapshotFrame=frame;depthSnapshotProducerOrdinal=candidateOrdinal;++depthSnapshotSuccesses;}
+        else{depthSnapshotValid=false;depthSnapshotSerial=0;depthSnapshotFrame=0;depthSnapshotProducerOrdinal=0;}
 
         auto j=SnapshotRecord();j.Bool("attempted",true);j.Num("attempt_index",snapshotAttempts);j.Num("generation_attempt_index",snapshotGenerationAttempts);j.Num("producer_draw_ordinal",candidateOrdinal);
         j.Num("end_scene_hr",int32_t(endHr));j.Num("stretch_rect_hr",int32_t(stretchHr));j.Num("begin_scene_hr",int32_t(beginHr));j.Num("bracket_cpu_ticks",uint64_t(qb.QuadPart-qa.QuadPart));j.Num("qpc_frequency",frequency.QuadPart);
         j.Bool("source_destination_distinct",distinct);j.Bool("descriptor_compatible",compatible);j.Bool("state_preserved",statePreserved);j.Bool("snapshot_valid",success);
-        j.Raw("source",Surface(before.rt.p,before.rtHr));j.Raw("destination",Surface(snapshotSurface,S_OK));j.Raw("state_before",ProbeJson(before));if(SUCCEEDED(beginHr))j.Raw("state_after",ProbeJson(after));
-        j.Num("source_msaa",unsigned(srcDesc.MultiSampleType));j.Num("destination_msaa",unsigned(snapshotDesc.MultiSampleType));Enqueue(std::move(j));
+        j.Bool("depth_copy_requested",config.depthCopyRequested);j.Bool("depth_snapshot_valid",depthSuccess);
+        j.Num("depth_stage1_hr",int32_t(depthStage1Hr));j.Num("depth_stage2_hr",int32_t(depthStage2Hr));
+        j.Raw("source",Surface(before.rt.p,before.rtHr));j.Raw("destination",Surface(snapshotSurface,S_OK));
+        j.Raw("depth_source",Surface(before.ds.p,before.dsHr));
+        j.Raw("depth_plain_destination",Surface(snapshotDepthPlainSurface,config.depthCopyRequested?S_OK:D3DERR_INVALIDCALL));
+        j.Raw("depth_intz_destination",Surface(snapshotDepthSurface,config.depthCopyRequested?S_OK:D3DERR_INVALIDCALL));
+        j.Raw("state_before",ProbeJson(before));if(SUCCEEDED(beginHr))j.Raw("state_after",ProbeJson(after));
+        j.Num("source_msaa",unsigned(srcDesc.MultiSampleType));j.Num("destination_msaa",unsigned(snapshotDesc.MultiSampleType));
+        if(config.depthCopyRequested){j.Num("depth_source_msaa",unsigned(depthSrcDesc.MultiSampleType));j.Num("depth_plain_msaa",unsigned(snapshotDepthPlainDesc.MultiSampleType));j.Num("depth_intz_msaa",unsigned(snapshotDepthDesc.MultiSampleType));}
+        Enqueue(std::move(j));
         if(FAILED(beginHr)&&SUCCEEDED(endHr)){
             quarantined=true;++captureErrors;if(!errorLogged){WLOG_ERROR("r6-water: snapshot BeginScene balance failed hr=0x%08lX; diagnostic quarantined",static_cast<unsigned long>(beginHr));errorLogged=true;}
         }
@@ -425,11 +502,11 @@ void Summary(){auto j=Record("summary");j.Num("liquid_dips_observed",observed);j
     j.Num("unknown_draws",familyCounts[0]);j.Num("water_draws",familyCounts[1]);j.Num("nospec_draws",familyCounts[2]);j.Num("procwater_draws",familyCounts[3]);j.Num("magma_draws",familyCounts[4]);
     j.Num("draw_primitive_calls",drawApiCounts[0]);j.Num("draw_indexed_primitive_calls",drawApiCounts[1]);j.Num("draw_primitive_up_calls",drawApiCounts[2]);j.Num("draw_indexed_primitive_up_calls",drawApiCounts[3]);
     j.Num("draw_primitive_failures",drawApiFailures[0]);j.Num("draw_indexed_primitive_failures",drawApiFailures[1]);j.Num("draw_primitive_up_failures",drawApiFailures[2]);j.Num("draw_indexed_primitive_up_failures",drawApiFailures[3]);
-    j.Num("snapshot_attempts",snapshotAttempts);j.Num("snapshot_successes",snapshotSuccesses);j.Num("snapshot_generation_attempts",snapshotGenerationAttempts);j.Num("snapshot_attempt_cap",kSnapshotAttemptLimit);j.Num("snapshot_generation_attempt_cap",kSnapshotAttemptsPerGeneration);
+    j.Num("snapshot_attempts",snapshotAttempts);j.Num("snapshot_successes",snapshotSuccesses);j.Num("depth_snapshot_successes",depthSnapshotSuccesses);j.Num("snapshot_generation_attempts",snapshotGenerationAttempts);j.Num("snapshot_attempt_cap",kSnapshotAttemptLimit);j.Num("snapshot_generation_attempt_cap",kSnapshotAttemptsPerGeneration);
     j.Bool("quarantined",quarantined);j.Str("timing_limit","CPU submission/inspection and snapshot bracket only; no GPU timing claim");Enqueue(std::move(j));}
 void OnEndScene(void*,const void* a){if(!ready||lost||quarantined)return;try{Device(static_cast<IDirect3DDevice9*>(static_cast<const ev::EndSceneArgs*>(a)->device));}catch(...){Failure();}}
 void OnFrame(void*,const void*){if(!ready||GetCurrentThreadId()!=renderThread)return;try{if(frame%300==0)Summary();Flush();++frame;}catch(...){Failure();}}
-void OnLost(void*,const void*){if(!ready)return;lost=true;worldSceneDepth=0;try{auto j=Record("lost");j.Bool("snapshot_resource_was_live",snapshotSurface!=nullptr);Enqueue(std::move(j));Summary();Flush();}catch(...){Failure();}ReleaseSnapshot();ReleaseShaders();device=nullptr;}
+void OnLost(void*,const void*){if(!ready)return;lost=true;worldSceneDepth=0;try{auto j=Record("lost");j.Bool("snapshot_resource_was_live",snapshotSurface!=nullptr);j.Bool("depth_snapshot_resource_was_live",snapshotDepthSurface!=nullptr);Enqueue(std::move(j));Summary();Flush();}catch(...){Failure();}ReleaseSnapshot();ReleaseShaders();device=nullptr;}
 void OnReset(void*,const void* a){if(!ready)return;try{lost=false;profiles.NewGeneration();boundaries.NewGeneration();worldSceneDepth=0;waterCandidateSeen=false;
     // Capture ceilings and the eight snapshot-attempt ceiling are process-wide across resets.
     Device(static_cast<IDirect3DDevice9*>(static_cast<const ev::DeviceResetArgs*>(a)->device));auto j=Record("reset");j.Bool("success",true);j.Str("snapshot_recreate_policy","lazy_on_next_water_candidate");Enqueue(std::move(j));}catch(...){Failure();}}
@@ -444,6 +521,7 @@ void OnSceneBegin(void*,const void* a){
         ++worldSceneSerial;view=worldSceneSerial;phase="world_scene_begin";sceneBeginOrdinal=globalDrawOrdinal;
         firstLiquidOrdinal=lastLiquidOrdinal=liquidDrawsScene=0;postWaterNonLiquid=postWaterLikelyOpaque=postWaterUnclassified=0;postWaterProbed=postWaterRecords=0;
         waterCandidateSeen=false;waterCandidateOrdinal=0;snapshotValid=false;snapshotSerial=snapshotFrame=snapshotProducerOrdinal=0;snapshotSourceRtToken=0;
+        depthSnapshotValid=false;depthSnapshotSerial=depthSnapshotFrame=depthSnapshotProducerOrdinal=0;
         Probe p;FillProbe(d,p);auto j=Record("world_scene");j.Str("point","begin");j.Num("depth",worldSceneDepth);j.Num("present_frame",frame);j.Num("draw_ordinal",sceneBeginOrdinal);j.Str("device_token",Pointer(d));j.Raw("state",ProbeJson(p));Enqueue(std::move(j));
     }catch(...){Failure();}
 }
@@ -456,6 +534,7 @@ void OnSceneEnd(void*,const void* a){
         j.Num("scene_begin_draw_ordinal",sceneBeginOrdinal);j.Bool("water_candidate_seen",waterCandidateSeen);j.Num("liquid_draws",liquidDrawsScene);j.Num("first_liquid_ordinal",firstLiquidOrdinal);j.Num("last_liquid_ordinal",lastLiquidOrdinal);
         j.Num("post_water_non_liquid_draws",postWaterNonLiquid);j.Num("post_water_probed",postWaterProbed);j.Num("post_water_likely_opaque",postWaterLikelyOpaque);j.Num("post_water_unclassified_due_cap",postWaterUnclassified);
         j.Bool("snapshot_valid",snapshotValid&&snapshotSerial==worldSceneSerial);j.Num("snapshot_producer_ordinal",snapshotProducerOrdinal);j.Str("snapshot_source_rt_token",Pointer(reinterpret_cast<void*>(snapshotSourceRtToken)));
+        j.Bool("depth_snapshot_valid",depthSnapshotValid&&depthSnapshotSerial==worldSceneSerial);j.Num("depth_snapshot_producer_ordinal",depthSnapshotProducerOrdinal);
         if(CanInspect(d))j.Raw("targets_end",Targets(d));
         j.Num("water_candidate_ordinal",waterCandidateOrdinal);j.Bool("ordering_candidate_pass",waterCandidateSeen&&firstLiquidOrdinal>waterCandidateOrdinal&&postWaterLikelyOpaque==0&&postWaterUnclassified==0);
         Enqueue(std::move(j));--worldSceneDepth;
@@ -478,12 +557,13 @@ bool Install(){
         ev::Subscribe(ev::Event::OnWorldLeave,&OnWorldLeave,nullptr);ev::Subscribe(ev::Event::OnWorldSceneBegin,&OnSceneBegin,nullptr);
         ev::Subscribe(ev::Event::OnWorldSceneEnd,&OnSceneEnd,nullptr);ev::Subscribe(ev::Event::OnWorldRenderEnd,&OnWorldEnd,nullptr);
         ready=true;auto j=Record("session");j.Str("exe_sha256",kExeSha);j.Num("mode",unsigned(config.mode));j.Num("samples_per_profile",config.samples);j.Num("max_draws",config.maxDraws);j.Num("max_mib",config.maxMiB);
-        j.Bool("copy_requested",config.copyRequested);j.Bool("copy_supported",true);j.Bool("replacement_supported",false);j.Bool("replacement_eligibility_supported",true);
+        j.Bool("copy_requested",config.copyRequested);j.Bool("copy_supported",true);j.Bool("depth_copy_requested",config.depthCopyRequested);j.Bool("depth_copy_supported",true);j.Bool("replacement_supported",false);j.Bool("replacement_eligibility_supported",true);
         j.Str("replacement_allowlist","P01/P02/P03 only: base Water pass1 + exact final VS/PS + declaration + material + terrain/WMO provider; still native-forwarded");
         j.Num("copy_attempt_cap",kSnapshotAttemptLimit);j.Num("copy_attempts_per_generation",kSnapshotAttemptsPerGeneration);j.Str("copy_gate","Diagnostic only: first base-Water material in one world-scene serial; four attempts are reserved per device generation and native water is never suppressed or replaced");
         j.Str("classic_target_controls","water 0..3; ripple 0..2; reflection 0 screen,1 sky,2 sky+terrain,3 sky+terrain+WMO; not Wrath live setting values");
         Enqueue(std::move(j));Flush();WLOG_INFO("r6-water: native-preserving diagnostic enabled; output=%s",capturePath.c_str());
         if(config.copyRequested)WLOG_INFO("r6-water: bounded pre-Water colour snapshot proof armed; max attempts=%u; no replacement",kSnapshotAttemptLimit);
+        if(config.depthCopyRequested)WLOG_INFO("r6-water: bounded pre-Water two-stage depth transport proof armed; no replacement");
     }catch(...){ready=false;Failure();}return true;
 }
 // All pending records are normally flushed at Present/world leave. At process shutdown,

@@ -20,7 +20,7 @@ inline const char* Name(Family v) {
 inline const char* Name(Provider v) { return v==Provider::Terrain?"terrain":v==Provider::Wmo?"wmo":"unknown"; }
 inline unsigned Selector(Family f) { return f==Family::Magma?2:f==Family::ProcWater?3:(f==Family::Water||f==Family::WaterNoSpec)?1:0; }
 struct Config {
-    bool enabled=false, valid=true, copyRequested=false;
+    bool enabled=false, valid=true, copyRequested=false, depthCopyRequested=false;
     Mode mode=Mode::Full;
     unsigned samples=3, maxDraws=256, maxMiB=16;
 };
@@ -47,6 +47,11 @@ template<class Get> Config ParseConfig(Get get) {
         if((s=get(o.name)) && !Decimal(s,o.lo,o.hi,*o.dst))c.valid=false;
     s=get("WXL_CLASSIC_WATER_DIAG_COPY");
     if(s) {if(std::strcmp(s,"1")==0)c.copyRequested=true;else if(std::strcmp(s,"0")!=0)c.valid=false;}
+    s=get("WXL_CLASSIC_WATER_DIAG_DEPTH_COPY");
+    if(s) {if(std::strcmp(s,"1")==0)c.depthCopyRequested=true;else if(std::strcmp(s,"0")!=0)c.valid=false;}
+    // Depth transport extends the already-proven pre-Water colour-copy bracket.
+    // Requiring COPY=1 keeps the old diagnostic behaviour exactly reproducible.
+    if(c.depthCopyRequested&&!c.copyRequested)c.valid=false;
     if(!c.valid)c.enabled=false;
     return c;
 }

@@ -18,6 +18,11 @@ int main(){
     env["WXL_CLASSIC_WATER_DIAG_MODE"]="replacement";CHECK(!ParseConfig(get).enabled);
     env["WXL_CLASSIC_WATER_DIAG_MODE"]="timing";CHECK(ParseConfig(get).mode==Mode::Timing);
     env["WXL_CLASSIC_WATER_DIAG_COPY"]="1";CHECK(ParseConfig(get).copyRequested);
+    env["WXL_CLASSIC_WATER_DIAG_DEPTH_COPY"]="1";CHECK(ParseConfig(get).depthCopyRequested);
+    env["WXL_CLASSIC_WATER_DIAG_COPY"]="0";CHECK(!ParseConfig(get).valid);
+    env["WXL_CLASSIC_WATER_DIAG_COPY"]="1";
+    env["WXL_CLASSIC_WATER_DIAG_DEPTH_COPY"]="bogus";CHECK(!ParseConfig(get).valid);
+    env["WXL_CLASSIC_WATER_DIAG_DEPTH_COPY"]="1";CHECK(ParseConfig(get).enabled);
     env["WXL_CLASSIC_WATER_DIAG"]="0";CHECK(!ParseConfig(get).enabled);
     CHECK(Hex(Sha256::Of("",0))=="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
     CHECK(Hex(Sha256::Of("abc",3))=="ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
