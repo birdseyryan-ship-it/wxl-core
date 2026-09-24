@@ -226,7 +226,7 @@ void NativeBytes(Json& j,const native::Context& c){
     ok=c.settings&&native::Read(static_cast<const char*>(c.settings)+0x300,settings,sizeof(settings));j.Bool("settings_read",ok);if(ok)j.Str("settings_300_35f_hex",Hex(settings,sizeof(settings)));
     j.Str("native_bytes_limit","Source-declared fields, raw capture only; readable memory does not prove coordinate/colour semantics");
 }
-void Capture(IDirect3DDevice9* d,D3DPRIMITIVETYPE type,INT base,UINT min,UINT vertices,UINT start,UINT primitives,const native::Context& c){
+void Capture(IDirect3DDevice9* d,D3DPRIMITIVETYPE type,INT base,UINT min,UINT vertices,UINT start,UINT primitives,uint64_t drawOrdinal,const native::Context& c){
     Com<IDirect3DVertexShader9> vs;Com<IDirect3DPixelShader9> ps;HRESULT vhr=d->GetVertexShader(vs.Out()),phr=d->GetPixelShader(ps.Out());
     auto vi=SUCCEEDED(vhr)?Identify(vs.p,"vs"):ShaderInfo{};
     auto pi=SUCCEEDED(phr)?Identify(ps.p,"ps"):ShaderInfo{};
@@ -240,10 +240,21 @@ void Capture(IDirect3DDevice9* d,D3DPRIMITIVETYPE type,INT base,UINT min,UINT ve
         key.material=Sha256::Of(materialData.data(),materialData.size());
     key.topology=unsigned(type);
     if(!profiles.Admit(key,frame,config.samples,config.maxDraws))return;
+    const auto futureProfile=AllowlistedReplacementProfile(key);
+    Com<IDirect3DSurface9> eligibilityRt;const HRESULT eligibilityRtHr=d->GetRenderTarget(0,eligibilityRt.Out());
+    const bool sameSnapshotRt=SUCCEEDED(eligibilityRtHr)&&snapshotSourceRtToken!=0&&reinterpret_cast<uintptr_t>(eligibilityRt.p)==snapshotSourceRtToken;
+    const bool snapshotSameScene=snapshotSerial==worldSceneSerial&&snapshotSerial!=0;
+    const bool snapshotSameFrame=snapshotFrame==frame&&snapshotFrame!=0;
+    const bool producerBeforeConsumer=snapshotProducerOrdinal!=0&&snapshotProducerOrdinal<drawOrdinal;
+    const bool futureTransportReady=ReplacementTransportReady(snapshotValid,snapshotSameScene,snapshotSameFrame,producerBeforeConsumer,sameSnapshotRt);
     auto j=Record("draw");j.Num("invocation",c.invocation);j.Num("scope_depth",c.depth);j.Num("pass",c.pass);j.Num("instances",c.instances);
     j.Str("material_class",Name(c.family));j.Num("selector_by_verified_class",Selector(c.family));j.Str("provider",Name(c.provider));
     j.Str("material_settings_sha256",Hex(key.material));
-    j.Str("classification",Classification(true,c.family,c.provider,vi.valid,pi.valid));j.Bool("replacement_allowed",false);
+    j.Str("classification",Classification(true,c.family,c.provider,vi.valid,pi.valid));
+    j.Str("future_replacement_profile",Name(futureProfile));j.Bool("future_replacement_profile_allowlisted",futureProfile!=ReplacementProfile::None);
+    j.Bool("future_replacement_transport_ready",futureTransportReady);j.Bool("future_snapshot_same_scene",snapshotSameScene);j.Bool("future_snapshot_same_frame",snapshotSameFrame);
+    j.Bool("future_snapshot_before_consumer",producerBeforeConsumer);j.Bool("future_snapshot_same_rt",sameSnapshotRt);
+    j.Bool("replacement_allowed",false);
     j.Str("material_token",Pointer(c.material));j.Str("settings_token",Pointer(c.settings));j.Str("geometry_token",Pointer(c.geometry));j.Str("animation_token",Pointer(c.animation));
     j.Num("vs_get_hr",int32_t(vhr));j.Num("ps_get_hr",int32_t(phr));j.Num("vs_id",vi.id);j.Num("ps_id",pi.id);
     j.Str("vs_sha256",vi.valid?Hex(vi.hash):"UNKNOWN");j.Str("ps_sha256",pi.valid?Hex(pi.hash):"UNKNOWN");
@@ -348,14 +359,14 @@ HRESULT WINAPI DrawPrimitive(IDirect3DDevice9* d,D3DPRIMITIVETYPE type,UINT star
 HRESULT WINAPI Dip(IDirect3DDevice9* d,D3DPRIMITIVETYPE type,INT base,UINT min,UINT vertices,UINT start,UINT primitives){
     Chain* chain=Find(d);if(!chain||!chain->dip)return D3DERR_INVALIDCALL; // Installed only on retained table entries.
     const auto* c=native::Current();bool eligible=c&&!inspecting&&CanInspect(d);
-    if(!inspecting&&CanInspect(d))TrackDraw(d,c!=nullptr,1,"DrawIndexedPrimitive");
+    const uint64_t drawOrdinal=!inspecting&&CanInspect(d)?TrackDraw(d,c!=nullptr,1,"DrawIndexedPrimitive"):0;
     LARGE_INTEGER a{},b{};
     // Capture exceptions cannot suppress or duplicate the original submission.
     return ObserveThenForward(eligible,[&]{
         ++observed;++familyCounts[unsigned(c->family)];QueryPerformanceCounter(&a);
         InspectionScope guard(inspecting);
         if(config.mode!=Mode::Timing&&profiles.total<config.maxDraws&&outputBudget.used<outputBudget.limit)
-            Capture(d,type,base,min,vertices,start,primitives,*c);
+            Capture(d,type,base,min,vertices,start,primitives,drawOrdinal,*c);
         QueryPerformanceCounter(&b);diagTicks+=uint64_t(b.QuadPart-a.QuadPart);
     },[&]{
     if(eligible&&config.mode==Mode::Timing)QueryPerformanceCounter(&a);
@@ -467,7 +478,8 @@ bool Install(){
         ev::Subscribe(ev::Event::OnWorldLeave,&OnWorldLeave,nullptr);ev::Subscribe(ev::Event::OnWorldSceneBegin,&OnSceneBegin,nullptr);
         ev::Subscribe(ev::Event::OnWorldSceneEnd,&OnSceneEnd,nullptr);ev::Subscribe(ev::Event::OnWorldRenderEnd,&OnWorldEnd,nullptr);
         ready=true;auto j=Record("session");j.Str("exe_sha256",kExeSha);j.Num("mode",unsigned(config.mode));j.Num("samples_per_profile",config.samples);j.Num("max_draws",config.maxDraws);j.Num("max_mib",config.maxMiB);
-        j.Bool("copy_requested",config.copyRequested);j.Bool("copy_supported",true);j.Bool("replacement_supported",false);
+        j.Bool("copy_requested",config.copyRequested);j.Bool("copy_supported",true);j.Bool("replacement_supported",false);j.Bool("replacement_eligibility_supported",true);
+        j.Str("replacement_allowlist","P01/P02/P03 only: base Water pass1 + exact final VS/PS + declaration + material + terrain/WMO provider; still native-forwarded");
         j.Num("copy_attempt_cap",kSnapshotAttemptLimit);j.Num("copy_attempts_per_generation",kSnapshotAttemptsPerGeneration);j.Str("copy_gate","Diagnostic only: first base-Water material in one world-scene serial; four attempts are reserved per device generation and native water is never suppressed or replaced");
         j.Str("classic_target_controls","water 0..3; ripple 0..2; reflection 0 screen,1 sky,2 sky+terrain,3 sky+terrain+WMO; not Wrath live setting values");
         Enqueue(std::move(j));Flush();WLOG_INFO("r6-water: native-preserving diagnostic enabled; output=%s",capturePath.c_str());

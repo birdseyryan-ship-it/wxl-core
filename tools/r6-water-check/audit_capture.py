@@ -51,6 +51,16 @@ def audit(path, extract=None):
             if event == 'draw':
                 if r.get('replacement_allowed') is not False:
                     raise ValueError('draw is not explicitly native-only')
+                profile = r.get('future_replacement_profile')
+                allowlisted = r.get('future_replacement_profile_allowlisted')
+                if profile is not None:
+                    if profile not in {'none','P01','P02','P03'}:
+                        raise ValueError('unknown future replacement profile')
+                    if allowlisted is not (profile != 'none'):
+                        raise ValueError('future replacement profile flag mismatch')
+                    for key in ('future_replacement_transport_ready','future_snapshot_same_scene','future_snapshot_same_frame','future_snapshot_before_consumer','future_snapshot_same_rt'):
+                        if not isinstance(r.get(key), bool):
+                            raise ValueError(f'missing future replacement gate field: {key}')
                 expected = {'Magma':2,'ProcWater':3,'Water':1,'WaterNoSpec':1,'Unknown':0}[r['material_class']]
                 if r['selector_by_verified_class'] != expected:
                     raise ValueError('material selector/class mismatch')

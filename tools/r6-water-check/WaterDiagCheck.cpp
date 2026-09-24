@@ -34,6 +34,15 @@ int main(){
     CHECK(std::string(Classification(true,Family::Water,Provider::Unknown,true,true))=="context_only_unknown_provider");
     CHECK(std::string(Classification(true,Family::ProcWater,Provider::Terrain,true,false))=="context_only_fixed_or_query_failed");
     CHECK(std::string(Classification(true,Family::Magma,Provider::Wmo,true,true))=="observed_material_and_final_shader_pair");
+    ProfileKey p01;p01.family=Family::Water;p01.provider=Provider::Terrain;p01.pass=1;p01.vs=kR6BaseWaterVs;p01.ps=kR6BaseWaterPs;p01.declaration=kR6BaseWaterDecl;p01.material=kR6WaterMaterialP01;p01.topology=5;
+    CHECK(AllowlistedReplacementProfile(p01)==ReplacementProfile::P01);
+    auto p02=p01;p02.material=kR6WaterMaterialP02P03;CHECK(AllowlistedReplacementProfile(p02)==ReplacementProfile::P02);
+    auto p03=p02;p03.provider=Provider::Wmo;CHECK(AllowlistedReplacementProfile(p03)==ReplacementProfile::P03);
+    auto reject=p02;reject.pass=0;CHECK(AllowlistedReplacementProfile(reject)==ReplacementProfile::None);
+    reject=p02;reject.family=Family::WaterNoSpec;CHECK(AllowlistedReplacementProfile(reject)==ReplacementProfile::None);
+    reject=p02;reject.vs=Sha256::Of("one-light",9);CHECK(AllowlistedReplacementProfile(reject)==ReplacementProfile::None);
+    CHECK(ReplacementTransportReady(true,true,true,true,true));
+    CHECK(!ReplacementTransportReady(true,true,true,false,true));
     ProfileKey k;k.family=Family::ProcWater;k.provider=Provider::Terrain;k.vs=Sha256::Of("vs",2);k.ps=Sha256::Of("ps",2);
     ProfileLimiter l;CHECK(l.Admit(k,0,3,256));CHECK(!l.Admit(k,0,3,256));CHECK(!l.Admit(k,179,3,256));
     CHECK(l.Admit(k,180,3,256));CHECK(!l.Admit(k,1,3,256));CHECK(l.Admit(k,360,3,256));CHECK(!l.Admit(k,540,3,256));
@@ -46,5 +55,5 @@ int main(){
     CHECK(hr==-123&&calls==1&&failures==1&&!busy);
     hr=ObserveThenForward(false,[&]{throw 8;},[&]{++calls;return 17;},[&]{++failures;});
     CHECK(hr==17&&calls==2&&failures==1);
-    std::printf("PASS %u R6 checks: SHA256, flags/default-off, bounds, material+shader classification, dedup/sample ceilings\n",tests);return 0;
+    std::printf("PASS %u R6 checks: SHA256, flags/default-off, bounds, exact P01/P02/P03 future replacement allowlist, transport gate, dedup/sample ceilings\n",tests);return 0;
 }
