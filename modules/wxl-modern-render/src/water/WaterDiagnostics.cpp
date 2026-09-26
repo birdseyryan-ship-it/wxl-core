@@ -1,6 +1,7 @@
 // R6 native-preserving liquid diagnostics. No replacement path; bounded colour snapshot proof only.
 // GPL-3.0-or-later. All D3D inspection is confined to the native render thread.
 #include "water/WaterDiagCore.hpp"
+#include "water/Slot3SnapshotView.hpp"
 #include "client/CWorldScene/LiquidDiagnostics.hpp"
 #include "client/CWorldScene/RenderModernBridge.hpp"
 #include "offsets/engine/Gx.hpp"
@@ -571,6 +572,52 @@ bool Install(){
 struct Shutdown {
     ~Shutdown(){if(!ready||!sink.is_open())return;try{auto j=Record("shutdown");j.Num("pending_records_not_flushed",pending.size());j.Num("dropped_records",outputBudget.dropped);auto s=j.End()+'\n';sink.write(s.data(),std::streamsize(s.size()));sink.flush();}catch(...){}}
 } shutdown;
+} // namespace
+
+bool BorrowPreWaterSnapshot(IDirect3DDevice9* expectedDevice,
+                            uintptr_t expectedSourceRt,
+                            uint64_t consumerOrdinal,
+                            PreWaterSnapshotView& output) noexcept
+{
+    output = {};
+    if (!expectedDevice || !expectedSourceRt || !consumerOrdinal ||
+        !CanInspect(expectedDevice) || worldSceneDepth != 1 ||
+        !snapshotValid || !depthSnapshotValid ||
+        snapshotSerial != worldSceneSerial || depthSnapshotSerial != worldSceneSerial ||
+        snapshotFrame != frame || depthSnapshotFrame != frame ||
+        !snapshotProducerOrdinal || !depthSnapshotProducerOrdinal ||
+        snapshotProducerOrdinal >= consumerOrdinal || depthSnapshotProducerOrdinal >= consumerOrdinal ||
+        snapshotSourceRtToken != expectedSourceRt ||
+        !snapshotTexture || !snapshotDepthTexture ||
+        snapshotDesc.Width == 0 || snapshotDesc.Height == 0 ||
+        snapshotDepthDesc.Width != snapshotDesc.Width ||
+        snapshotDepthDesc.Height != snapshotDesc.Height ||
+        snapshotDepthDesc.Format != kIntz)
+        return false;
+
+    PreWaterSnapshotView candidate{};
+    candidate.colour = snapshotTexture;
+    candidate.rawDepthIntz = snapshotDepthTexture;
+    candidate.device = reinterpret_cast<uintptr_t>(expectedDevice);
+    candidate.sourceRt = snapshotSourceRtToken;
+    candidate.generation = generation;
+    candidate.scene = worldSceneSerial;
+    candidate.frame = frame;
+    candidate.colourProducerOrdinal = snapshotProducerOrdinal;
+    candidate.depthProducerOrdinal = depthSnapshotProducerOrdinal;
+    candidate.width = snapshotDesc.Width;
+    candidate.height = snapshotDesc.Height;
+    candidate.colourFormat = unsigned(snapshotDesc.Format);
+    candidate.depthFormat = unsigned(snapshotDepthDesc.Format);
+
+    if (!SnapshotMetadataCompatible(candidate,
+                                    reinterpret_cast<uintptr_t>(expectedDevice),
+                                    expectedSourceRt,
+                                    consumerOrdinal))
+        return false;
+
+    output = candidate;
+    return true;
 }
-}
+} // namespace wxl::waterdiag
 WXL_REGISTER_FEATURE("r6-water-diagnostics",true,wxl::waterdiag::Install)

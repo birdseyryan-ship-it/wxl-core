@@ -110,6 +110,9 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 4)
         "${CMAKE_CURRENT_SOURCE_DIR}/modules/wxl-modern-render/src/OverlayPanel.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/modules/wxl-modern-render/src/grass/GrassMotion.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/modules/wxl-modern-render/src/water/WaterDiagnostics.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/modules/wxl-modern-render/src/water/Slot3ShaderRuntime.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/modules/wxl-modern-render/src/water/Slot3ConstantRuntime.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/modules/wxl-modern-render/src/water/Slot3DepthRuntime.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/modules/wxl-modern-render/src/shadows/ClassicShadows.cpp"
         ${WXL_RENDER_MODERN_GPU}
         ${WXL_RENDER_MODERN_EFFECTS})
