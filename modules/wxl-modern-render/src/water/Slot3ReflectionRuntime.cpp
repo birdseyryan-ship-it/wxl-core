@@ -332,8 +332,8 @@ namespace wxl::water::slot3
 
         bool BuildCamera(
             IDirect3DDevice9* device,
-            const Vec3& eye,
-            const Vec3& target) noexcept
+            const ReflectionVec3& eye,
+            const ReflectionVec3& target) noexcept
         {
             const auto build =
                 reinterpret_cast<
