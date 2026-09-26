@@ -187,6 +187,74 @@ namespace wxl::scripts::render_modern::grass
         }
 
         /**
+         * @brief Copies D3DDisassemble text without relying on C-string termination.
+         *
+         * Newer d3dcompiler/Proton combinations may return a blob whose textual
+         * payload ends in the historical DOS EOF byte 0x1A before normal blob
+         * padding/termination. D3DAssemble rejects that byte. Accept exactly one
+         * trailing 0x1A, ignore trailing NUL storage bytes, and reject unexpected
+         * embedded control bytes rather than silently altering shader text.
+         */
+        bool CopyValidatedDisassemblyText(
+            const void* buffer,
+            size_t bufferSize,
+            std::string& out,
+            bool& strippedDosEof)
+        {
+            out.clear();
+            strippedDosEof = false;
+
+            if (!buffer || bufferSize == 0)
+                return false;
+
+            const char* bytes =
+                static_cast<const char*>(buffer);
+
+            size_t end = bufferSize;
+
+            // ID3DBlob storage may include one or more ordinary trailing NULs.
+            while (end > 0 && bytes[end - 1] == '\0')
+                --end;
+
+            // The current proven compatibility regression is one DOS EOF byte
+            // after otherwise valid D3D assembly text.
+            if (end > 0 &&
+                static_cast<unsigned char>(bytes[end - 1]) == 0x1A)
+            {
+                --end;
+                strippedDosEof = true;
+            }
+
+            if (end == 0)
+                return false;
+
+            // Preserve shader text exactly apart from the proven trailing
+            // terminator. Fail closed if any unexpected control byte is
+            // embedded in the actual text payload.
+            for (size_t i = 0; i < end; ++i)
+            {
+                const unsigned char c =
+                    static_cast<unsigned char>(bytes[i]);
+
+                const bool allowedWhitespace =
+                    c == '\t' ||
+                    c == '\n' ||
+                    c == '\r';
+
+                if (c == 0x00 ||
+                    c == 0x1A ||
+                    c == 0x7F ||
+                    (c < 0x20 && !allowedWhitespace))
+                {
+                    return false;
+                }
+            }
+
+            out.assign(bytes, end);
+            return true;
+        }
+
+        /**
          * @brief Disassembles a vertex shader to text.
          * @param vs  the shader to disassemble.
          * @return the disassembly blob (caller releases), or null on failure.
@@ -220,8 +288,30 @@ namespace wxl::scripts::render_modern::grass
             ID3DBlob* text = Disassemble(engineVS);
             if (!text) return false;
 
-            std::string src(static_cast<const char*>(text->GetBufferPointer()));
+            std::string src;
+            bool strippedDosEof = false;
+
+            const bool textOk =
+                CopyValidatedDisassemblyText(
+                    text->GetBufferPointer(),
+                    text->GetBufferSize(),
+                    src,
+                    strippedDosEof);
+
             text->Release();
+
+            if (!textOk)
+            {
+                WLOG_WARN(
+                    "grass: disassembly text rejected by bounded validation");
+                return false;
+            }
+
+            if (strippedDosEof)
+            {
+                WLOG_INFO(
+                    "grass: stripped trailing D3DDisassemble DOS EOF byte");
+            }
 
             // R4C3-E: D3DDisassemble output is not directly accepted by
             // D3DAssemble.  In addition to emitting "def cN = ...", the live
