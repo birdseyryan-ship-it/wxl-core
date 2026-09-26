@@ -1,6 +1,7 @@
 #include "water/Slot3Core.hpp"
 #include "water/Slot3Constants.hpp"
 #include "water/Slot3DepthRuntime.hpp"
+#include "water/Slot3MaterialRuntime.hpp"
 #include "water/Slot3Shaders.hpp"
 #include "water/Slot3SnapshotView.hpp"
 #include <cstdio>
@@ -517,6 +518,67 @@ int main() {
     CHECK(
         !lifecycle.MarkContentReady(
             resizedDepthKey));
+
+    // Exact build-pinned Material-1 resources.
+    CHECK(
+        kT5Asset.path ==
+        R"(XTextures\ocean\newoceanbump.blp)");
+
+    CHECK(
+        kT7Asset.path ==
+        R"(XTextures\foam\waterchop7bw.blp)");
+
+    CHECK(kT5Asset.frameCount == 1u);
+    CHECK(kT7Asset.frameCount == 1u);
+    CHECK(kT5Asset.path != kT7Asset.path);
+
+    MaterialLifecycleState material{};
+
+    CHECK(!material.Ready());
+
+    CHECK(
+        material.t5Handle == 0 &&
+        material.t5Gx == 0 &&
+        material.t7Handle == 0 &&
+        material.t7Gx == 0);
+
+    CHECK(!material.SetT5(0, 1));
+    CHECK(!material.SetT5(1, 0));
+
+    CHECK(
+        material.t5Handle == 0 &&
+        material.t5Gx == 0);
+
+    CHECK(material.SetT5(1, 2));
+    CHECK(!material.Ready());
+
+    CHECK(
+        material.t5Handle == 1 &&
+        material.t5Gx == 2);
+
+    CHECK(!material.SetT7(0, 4));
+    CHECK(!material.SetT7(3, 0));
+
+    CHECK(material.SetT7(3, 4));
+    CHECK(material.Ready());
+
+    CHECK(
+        material.t7Handle == 3 &&
+        material.t7Gx == 4);
+
+    material.Reset();
+
+    CHECK(!material.Ready());
+
+    CHECK(
+        material.t5Handle == 0 &&
+        material.t5Gx == 0 &&
+        material.t7Handle == 0 &&
+        material.t7Gx == 0);
+
+    CHECK(
+        MaterialProduceStatus::Ready !=
+        MaterialProduceStatus::Unavailable);
 
     // The source strings are production inputs to D3DCompile. Freeze the narrow
     // slot-3 ABI here so a future edit cannot silently add an unproven resource
