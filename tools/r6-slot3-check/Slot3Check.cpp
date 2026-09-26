@@ -2,6 +2,8 @@
 #include "water/Slot3Constants.hpp"
 #include "water/Slot3DepthRuntime.hpp"
 #include "water/Slot3MaterialRuntime.hpp"
+#include "water/Slot3ReflectionRuntime.hpp"
+#include "water/Slot3ReflectionBackendPolicy.hpp"
 #include "water/Slot3Shaders.hpp"
 #include "water/Slot3SnapshotView.hpp"
 #include <cstdio>
@@ -579,6 +581,703 @@ int main() {
     CHECK(
         MaterialProduceStatus::Ready !=
         MaterialProduceStatus::Unavailable);
+
+
+    // R6 selected-mode reflection contract.
+    //
+    // The arbitrary non-zero d3dColourFormat values below exercise the
+    // explicit translation gate only. They DO NOT assign Classic internal
+    // engine format ID 6 to any D3D9 format.
+    CHECK(SupportedReflectionMode(1u));
+    CHECK(SupportedReflectionMode(2u));
+    CHECK(SupportedReflectionMode(3u));
+    CHECK(!SupportedReflectionMode(0u));
+    CHECK(!SupportedReflectionMode(4u));
+
+    CHECK(
+        ReflectionContentMask(1u) ==
+        ReflectionSky);
+
+    CHECK(
+        ReflectionContentMask(2u) ==
+        (ReflectionSky |
+         ReflectionTerrain));
+
+    CHECK(
+        ReflectionContentMask(3u) ==
+        (ReflectionSky |
+         ReflectionTerrain |
+         ReflectionWmo));
+
+    CHECK(
+        ReflectionContentMask(0u) ==
+        0u);
+
+    CHECK(!ReflectionNeedsViewerLocate(1u));
+    CHECK(!ReflectionNeedsViewerLocate(2u));
+    CHECK(ReflectionNeedsViewerLocate(3u));
+
+    ReflectionRequest reflectionRequest{};
+
+    reflectionRequest.device = 11;
+    reflectionRequest.sourceRt = 12;
+    reflectionRequest.generation = 13;
+    reflectionRequest.scene = 14;
+    reflectionRequest.frame = 15;
+    reflectionRequest.consumerOrdinal = 20;
+    reflectionRequest.parentWidth = 3840;
+    reflectionRequest.parentHeight = 2160;
+    reflectionRequest.downsampleShift = 2;
+    reflectionRequest.d3dColourFormat = 21;
+    reflectionRequest.mode = 3;
+    reflectionRequest.plane = 10.f;
+    reflectionRequest.eye = {1.f, 2.f, 14.f};
+    reflectionRequest.target = {3.f, 4.f, 8.f};
+
+    ReflectionPlan reflectionPlan{};
+
+    CHECK(
+        BuildReflectionPlan(
+            reflectionRequest,
+            reflectionPlan));
+
+    CHECK(reflectionPlan.valid);
+
+    CHECK(
+        reflectionPlan.targetWidth == 960u &&
+        reflectionPlan.targetHeight == 540u);
+
+    CHECK(
+        reflectionPlan.downsampleShift ==
+        2u);
+
+    CHECK(
+        reflectionPlan.d3dColourFormat ==
+        21u);
+
+    CHECK(
+        reflectionPlan.contentMask ==
+        (ReflectionSky |
+         ReflectionTerrain |
+         ReflectionWmo));
+
+    CHECK(
+        Same(
+            reflectionPlan.originalEye,
+            reflectionRequest.eye));
+
+    CHECK(
+        Same(
+            reflectionPlan.originalTarget,
+            reflectionRequest.target));
+
+    CHECK(
+        reflectionPlan.reflectedEye.x == 1.f &&
+        reflectionPlan.reflectedEye.y == 2.f &&
+        reflectionPlan.reflectedEye.z == 6.f);
+
+    CHECK(
+        reflectionPlan.reflectedTarget.x == 3.f &&
+        reflectionPlan.reflectedTarget.y == 4.f &&
+        reflectionPlan.reflectedTarget.z == 12.f);
+
+    {
+        auto request =
+            reflectionRequest;
+
+        request.downsampleShift = 0;
+
+        ReflectionPlan plan{};
+
+        CHECK(
+            BuildReflectionPlan(
+                request,
+                plan));
+
+        CHECK(
+            plan.targetWidth == 3840u &&
+            plan.targetHeight == 2160u);
+    }
+
+    {
+        auto request =
+            reflectionRequest;
+
+        request.d3dColourFormat = 0;
+
+        ReflectionPlan untouched =
+            reflectionPlan;
+
+        CHECK(
+            !BuildReflectionPlan(
+                request,
+                untouched));
+
+        CHECK(
+            untouched.valid &&
+            untouched.targetWidth ==
+                reflectionPlan.targetWidth &&
+            untouched.d3dColourFormat ==
+                reflectionPlan.d3dColourFormat);
+    }
+
+    for (unsigned badMode :
+         {0u, 4u})
+    {
+        auto request =
+            reflectionRequest;
+
+        request.mode =
+            badMode;
+
+        ReflectionPlan plan{};
+
+        CHECK(
+            !BuildReflectionPlan(
+                request,
+                plan));
+    }
+
+    {
+        auto request =
+            reflectionRequest;
+
+        request.parentWidth = 0;
+
+        ReflectionPlan plan{};
+
+        CHECK(
+            !BuildReflectionPlan(
+                request,
+                plan));
+    }
+
+    {
+        auto request =
+            reflectionRequest;
+
+        request.downsampleShift = 31;
+
+        ReflectionPlan plan{};
+
+        CHECK(
+            !BuildReflectionPlan(
+                request,
+                plan));
+    }
+
+    {
+        auto request =
+            reflectionRequest;
+
+        request.parentWidth = 1;
+        request.parentHeight = 1;
+        request.downsampleShift = 1;
+
+        ReflectionPlan plan{};
+
+        CHECK(
+            !BuildReflectionPlan(
+                request,
+                plan));
+    }
+
+    {
+        auto request =
+            reflectionRequest;
+
+        request.plane =
+            std::numeric_limits<float>::
+                quiet_NaN();
+
+        ReflectionPlan plan{};
+
+        CHECK(
+            !BuildReflectionPlan(
+                request,
+                plan));
+    }
+
+    {
+        auto request =
+            reflectionRequest;
+
+        request.eye.z =
+            std::numeric_limits<float>::
+                infinity();
+
+        ReflectionPlan plan{};
+
+        CHECK(
+            !BuildReflectionPlan(
+                request,
+                plan));
+    }
+
+    const ReflectionResourceKey
+        reflectionResources =
+            ResourceKey(
+                reflectionPlan);
+
+    CHECK(
+        reflectionResources.device == 11 &&
+        reflectionResources.width == 960 &&
+        reflectionResources.height == 540 &&
+        reflectionResources.d3dColourFormat == 21);
+
+    {
+        auto other =
+            reflectionResources;
+
+        CHECK(
+            SameReflectionResources(
+                reflectionResources,
+                other));
+
+        ++other.width;
+
+        CHECK(
+            !SameReflectionResources(
+                reflectionResources,
+                other));
+    }
+
+    ReflectionContentKey
+        reflectionContent{};
+
+    CHECK(
+        BuildReflectionContentKey(
+            reflectionPlan,
+            19,
+            reflectionContent));
+
+    CHECK(
+        reflectionContent.producerOrdinal ==
+            19 &&
+        reflectionContent.consumerOrdinal ==
+            20);
+
+    {
+        ReflectionContentKey key{};
+
+        CHECK(
+            !BuildReflectionContentKey(
+                reflectionPlan,
+                20,
+                key));
+
+        CHECK(
+            !BuildReflectionContentKey(
+                reflectionPlan,
+                21,
+                key));
+
+        CHECK(
+            !BuildReflectionContentKey(
+                reflectionPlan,
+                0,
+                key));
+    }
+
+    {
+        auto same =
+            reflectionContent;
+
+        CHECK(
+            SameReflectionContent(
+                reflectionContent,
+                same));
+
+        ++same.frame;
+
+        CHECK(
+            !SameReflectionContent(
+                reflectionContent,
+                same));
+    }
+
+    ReflectionLifecycleState
+        reflectionLifecycle{};
+
+    CHECK(
+        !reflectionLifecycle.resourcesReady &&
+        !reflectionLifecycle.contentReady);
+
+    reflectionLifecycle.MarkResourcesReady(
+        reflectionResources);
+
+    CHECK(
+        reflectionLifecycle.ResourcesMatch(
+            reflectionResources));
+
+    CHECK(
+        !reflectionLifecycle.contentReady);
+
+    CHECK(
+        reflectionLifecycle.MarkContentReady(
+            reflectionContent));
+
+    CHECK(
+        reflectionLifecycle.ContentMatches(
+            reflectionContent));
+
+    {
+        auto resized =
+            reflectionResources;
+
+        ++resized.width;
+
+        CHECK(
+            !reflectionLifecycle.ResourcesMatch(
+                resized));
+    }
+
+    reflectionLifecycle.InvalidateContent();
+
+    CHECK(
+        reflectionLifecycle.ResourcesMatch(
+            reflectionResources));
+
+    CHECK(
+        !reflectionLifecycle.ContentMatches(
+            reflectionContent));
+
+    reflectionLifecycle.Reset();
+
+    CHECK(
+        !reflectionLifecycle.resourcesReady &&
+        !reflectionLifecycle.contentReady);
+
+    struct ReflectionSequenceBackend
+    {
+        bool capture = true;
+        bool bind = true;
+        bool camera = true;
+        bool reflectedViewer = true;
+        bool sky = true;
+        bool terrain = true;
+        bool wmo = true;
+        bool originalCamera = true;
+        bool originalViewer = true;
+        bool gpu = true;
+
+        unsigned quarantines = 0;
+        std::string order{};
+
+        bool Capture() noexcept
+        {
+            order += 'C';
+            return capture;
+        }
+
+        bool BindTarget() noexcept
+        {
+            order += 'B';
+            return bind;
+        }
+
+        bool BuildReflectedCamera() noexcept
+        {
+            order += 'R';
+            return camera;
+        }
+
+        bool LocateReflectedViewer() noexcept
+        {
+            order += 'L';
+            return reflectedViewer;
+        }
+
+        bool RenderSky() noexcept
+        {
+            order += 'S';
+            return sky;
+        }
+
+        bool RenderTerrain() noexcept
+        {
+            order += 'T';
+            return terrain;
+        }
+
+        bool RenderWmo() noexcept
+        {
+            order += 'W';
+            return wmo;
+        }
+
+        bool RestoreOriginalCamera() noexcept
+        {
+            order += 'O';
+            return originalCamera;
+        }
+
+        bool LocateOriginalViewer() noexcept
+        {
+            order += 'V';
+            return originalViewer;
+        }
+
+        bool RestoreGpuState() noexcept
+        {
+            order += 'G';
+            return gpu;
+        }
+
+        void Quarantine() noexcept
+        {
+            ++quarantines;
+            order += 'Q';
+        }
+    };
+
+    {
+        auto plan =
+            reflectionPlan;
+
+        plan.mode = 1;
+
+        ReflectionSequenceBackend backend;
+
+        CHECK(
+            ExecuteReflectionSequence(
+                plan,
+                backend) ==
+            ReflectionSequenceStatus::
+                Produced);
+
+        CHECK(
+            backend.order ==
+            "CBRSOG");
+
+        CHECK(
+            backend.quarantines ==
+            0);
+    }
+
+    {
+        auto plan =
+            reflectionPlan;
+
+        plan.mode = 2;
+
+        ReflectionSequenceBackend backend;
+
+        CHECK(
+            ExecuteReflectionSequence(
+                plan,
+                backend) ==
+            ReflectionSequenceStatus::
+                Produced);
+
+        CHECK(
+            backend.order ==
+            "CBRSTOG");
+    }
+
+    {
+        ReflectionSequenceBackend backend;
+
+        CHECK(
+            ExecuteReflectionSequence(
+                reflectionPlan,
+                backend) ==
+            ReflectionSequenceStatus::
+                Produced);
+
+        CHECK(
+            backend.order ==
+            "CBRLSTWOVG");
+    }
+
+    {
+        ReflectionSequenceBackend backend;
+        backend.capture = false;
+
+        CHECK(
+            ExecuteReflectionSequence(
+                reflectionPlan,
+                backend) ==
+            ReflectionSequenceStatus::
+                UnavailableRestored);
+
+        CHECK(
+            backend.order ==
+            "C");
+    }
+
+    {
+        ReflectionSequenceBackend backend;
+        backend.bind = false;
+
+        CHECK(
+            ExecuteReflectionSequence(
+                reflectionPlan,
+                backend) ==
+            ReflectionSequenceStatus::
+                UnavailableRestored);
+
+        CHECK(
+            backend.order ==
+            "CBG");
+    }
+
+    {
+        ReflectionSequenceBackend backend;
+        backend.camera = false;
+
+        CHECK(
+            ExecuteReflectionSequence(
+                reflectionPlan,
+                backend) ==
+            ReflectionSequenceStatus::
+                UnavailableRestored);
+
+        CHECK(
+            backend.order ==
+            "CBROG");
+    }
+
+    {
+        ReflectionSequenceBackend backend;
+        backend.reflectedViewer = false;
+
+        CHECK(
+            ExecuteReflectionSequence(
+                reflectionPlan,
+                backend) ==
+            ReflectionSequenceStatus::
+                UnavailableRestored);
+
+        CHECK(
+            backend.order ==
+            "CBRLOVG");
+    }
+
+    {
+        auto plan =
+            reflectionPlan;
+
+        plan.mode = 2;
+
+        ReflectionSequenceBackend backend;
+        backend.sky = false;
+
+        CHECK(
+            ExecuteReflectionSequence(
+                plan,
+                backend) ==
+            ReflectionSequenceStatus::
+                UnavailableRestored);
+
+        CHECK(
+            backend.order ==
+            "CBRSOG");
+    }
+
+    {
+        ReflectionSequenceBackend backend;
+        backend.originalCamera = false;
+
+        CHECK(
+            ExecuteReflectionSequence(
+                reflectionPlan,
+                backend) ==
+            ReflectionSequenceStatus::
+                RestoreFailed);
+
+        CHECK(
+            backend.order ==
+            "CBRLSTWOGQ");
+
+        CHECK(
+            backend.quarantines ==
+            1);
+    }
+
+    {
+        ReflectionSequenceBackend backend;
+        backend.originalViewer = false;
+
+        CHECK(
+            ExecuteReflectionSequence(
+                reflectionPlan,
+                backend) ==
+            ReflectionSequenceStatus::
+                RestoreFailed);
+
+        CHECK(
+            backend.order ==
+            "CBRLSTWOVGQ");
+
+        CHECK(
+            backend.quarantines ==
+            1);
+    }
+
+    {
+        ReflectionSequenceBackend backend;
+        backend.gpu = false;
+
+        CHECK(
+            ExecuteReflectionSequence(
+                reflectionPlan,
+                backend) ==
+            ReflectionSequenceStatus::
+                RestoreFailed);
+
+        CHECK(
+            backend.order ==
+            "CBRLSTWOVGQ");
+
+        CHECK(
+            backend.quarantines ==
+            1);
+    }
+
+    // R6 native reflection backend policy.
+    CHECK(
+        kNativeReflectionD3dColourFormat ==
+        21u);
+
+    CHECK(
+        NativeReflectionFormatSupported(
+            21u));
+
+    CHECK(
+        !NativeReflectionFormatSupported(
+            20u));
+
+    CHECK(
+        NativeReflectionPlanSupported(
+            reflectionPlan));
+
+    {
+        auto unsupported =
+            reflectionPlan;
+
+        unsupported.d3dColourFormat =
+            22u;
+
+        CHECK(
+            !NativeReflectionPlanSupported(
+                unsupported));
+    }
+
+    CHECK(
+        NativeReflectionOutdoorStateSupported(
+            0,
+            0));
+
+    CHECK(
+        !NativeReflectionOutdoorStateSupported(
+            1,
+            0));
+
+    CHECK(
+        !NativeReflectionOutdoorStateSupported(
+            0,
+            1));
 
     // The source strings are production inputs to D3DCompile. Freeze the narrow
     // slot-3 ABI here so a future edit cannot silently add an unproven resource

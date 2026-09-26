@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.20)
+project(R6Slot3Check LANGUAGES CXX)
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+add_executable(R6Slot3Check Slot3Check.cpp)
+target_compile_features(R6Slot3Check PRIVATE cxx_std_20)
+target_include_directories(R6Slot3Check PRIVATE ../../modules/wxl-modern-render/src)
+enable_testing()
+add_test(NAME R6Slot3PolicyTransaction COMMAND R6Slot3Check)
