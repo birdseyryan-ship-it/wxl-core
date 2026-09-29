@@ -55,4 +55,18 @@ class CaptureChecks(unittest.TestCase):
         source=(Path(__file__).resolve().parents[2]/'modules'/'wxl-modern-render'/'src'/'water'/'WaterDiagnostics.cpp').read_text()
         self.assertIn('Json SnapshotRecord(){auto j=Record("snapshot_attempt")',source)
         self.assertNotIn('Json SnapshotRecord(){auto j=SnapshotRecord()',source)
+    def blocked_slot3(self):
+        r=self.fixture();r[0]['slot3_requested']=True
+        r.append(dict(r[0],event='slot3_transaction',sequence=4,bridge_qualified=False,
+                      submission=0,restore_ok=True,resources_ready=False,
+                      stage='native_state_bridge_unqualified',downsample_shift=0,reflection_mode=1))
+        return r
+    def test_blocked_slot3_is_native(self):
+        self.assertEqual(self.run_records(self.blocked_slot3())['events']['slot3_transaction'],1)
+    def test_blocked_slot3_cannot_claim_replacement(self):
+        for key,value in [('submission',1),('bridge_qualified',True),('restore_ok',False),
+                          ('resources_ready',True),('stage','submitted'),('downsample_shift',1),('reflection_mode',4)]:
+            with self.subTest(key=key):
+                r=self.blocked_slot3();r[-1][key]=value
+                with self.assertRaises(ValueError):self.run_records(r)
 if __name__=='__main__':unittest.main()

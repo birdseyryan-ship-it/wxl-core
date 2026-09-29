@@ -8,7 +8,7 @@ import hashlib
 import json
 from pathlib import Path
 
-EVENTS = {'session','device','boundary','shader','draw','world_scene','water_candidate','snapshot_attempt','post_water_draw','summary','lost','reset','world_leave','shutdown','error'}
+EVENTS = {'session','device','boundary','shader','draw','world_scene','water_candidate','snapshot_attempt','post_water_draw','summary','lost','reset','world_leave','shutdown','error','slot3_transaction'}
 
 def audit(path, extract=None):
     path = Path(path)
@@ -33,6 +33,19 @@ def audit(path, extract=None):
                     raise ValueError('replacement must remain disabled in native-preserving candidate')
                 if r.get('copy_supported') not in (False, True):
                     raise ValueError('copy support declaration missing')
+            if event == 'slot3_transaction':
+                # This auditor qualifies the native-preserving, blocked build.
+                # Operational replacement will require a separate acceptance audit.
+                if limits is None or limits.get('slot3_requested') is not True:
+                    raise ValueError('slot3 transaction without requested session')
+                if (r.get('bridge_qualified') is not False or r.get('submission') != 0
+                        or r.get('restore_ok') is not True
+                        or r.get('resources_ready') is not False):
+                    raise ValueError('blocked bridge must forward exactly one native submission')
+                if r.get('stage') != 'native_state_bridge_unqualified':
+                    raise ValueError('unexpected blocked production stage')
+                if r.get('downsample_shift') != 0 or r.get('reflection_mode') not in (1,2,3):
+                    raise ValueError('unsupported production configuration')
             if event == 'shader':
                 key = (r['generation'], r['id'])
                 if key in seen and seen[key] != r['sha256']:
