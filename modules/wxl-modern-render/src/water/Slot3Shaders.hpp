@@ -385,4 +385,25 @@ float4 main(PSIn v) : COLOR0
     return outColor;
 }
 )HLSL";
+
+// Exact frozen-R3 reconstruction: viewZ = B / (depth - A).
+// Shared verbatim with DepthRuntime and the actual Microsoft compiler gate.
+// No epsilon, clamp, far-plane substitution or invented transform.
+inline constexpr char kLinearDepthHlsl[] = R"HLSL(
+sampler2D RawDepth : register(s0);
+float4 Projection : register(c0);
+
+float4 main(float2 uv : TEXCOORD0) : COLOR0
+{
+    const float depth = tex2D(RawDepth, uv).x;
+    const float viewZ =
+        Projection.y / (depth - Projection.x);
+
+    return float4(
+        viewZ,
+        viewZ,
+        viewZ,
+        viewZ);
+}
+)HLSL";
 }

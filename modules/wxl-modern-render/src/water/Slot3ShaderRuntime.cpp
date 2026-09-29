@@ -2,6 +2,7 @@
 #include "water/Slot3ShaderRuntime.hpp"
 
 #include "water/Slot3Shaders.hpp"
+#include "water/Slot3ShaderCompileOptions.hpp"
 #include "common/Log.hpp"
 
 #include <windows.h>
@@ -44,7 +45,7 @@ bool Compile(const char* source,
         nullptr,
         "main",
         target,
-        D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3,
+        shaders::kLegacySm3CompileFlags,
         0,
         out,
         &errors);

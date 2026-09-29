@@ -3,6 +3,8 @@
 #if defined(_WIN32)
 
 #include "water/Slot3GpuState.hpp"
+#include "water/Slot3Shaders.hpp"
+#include "water/Slot3ShaderCompileOptions.hpp"
 #include <d3d9.h>
 #include <d3dcompiler.h>
 
@@ -18,30 +20,6 @@ namespace {
 // is fail-closed and does not authorise another guessed representation.
 constexpr D3DFORMAT kLinearDepthFormat =
     D3DFMT_R32F;
-
-// Exact frozen-R3 reconstruction:
-//
-//     viewZ = B / (depth - A)
-//
-// No epsilon, clamp, far-plane substitution or other invented transform is
-// introduced here.
-constexpr char kLinearDepthPs[] = R"HLSL(
-sampler2D RawDepth : register(s0);
-float4 Projection : register(c0);
-
-float4 main(float2 uv : TEXCOORD0) : COLOR0
-{
-    const float depth = tex2D(RawDepth, uv).x;
-    const float viewZ =
-        Projection.y / (depth - Projection.x);
-
-    return float4(
-        viewZ,
-        viewZ,
-        viewZ,
-        viewZ);
-}
-)HLSL";
 
 template <class T>
 void Release(T*& value) noexcept
@@ -91,14 +69,14 @@ bool DepthRuntime::EnsureShader(
 
     const HRESULT compile =
         D3DCompile(
-            kLinearDepthPs,
-            sizeof(kLinearDepthPs) - 1,
+            shaders::kLinearDepthHlsl,
+            sizeof(shaders::kLinearDepthHlsl) - 1,
             "wxl-r6-slot3-linear-depth",
             nullptr,
             nullptr,
             "main",
             "ps_3_0",
-            D3DCOMPILE_OPTIMIZATION_LEVEL3,
+            shaders::kLegacySm3CompileFlags,
             0,
             &code,
             &errors);

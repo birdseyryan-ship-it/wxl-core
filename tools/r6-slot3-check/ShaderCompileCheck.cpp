@@ -1,17 +1,20 @@
 // Executes the same compiler, entrypoint, targets and flags as ShaderRuntime.
 // This qualifies SM3 bytecode compilation only, not GPU execution or fidelity.
 #include "water/Slot3Shaders.hpp"
+#include "water/Slot3ShaderCompileOptions.hpp"
 #include <windows.h>
 #include <d3dcompiler.h>
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <initializer_list>
 
-static bool Compile(const char* source, const char* target, const char* name) {
+static bool Compile(const char* source, const char* target, const char* name,
+                    std::initializer_list<const char*> slots = {}) {
     ID3DBlob* code=nullptr;
     ID3DBlob* errors=nullptr;
     const HRESULT hr=D3DCompile(source,std::strlen(source),name,nullptr,nullptr,
-        "main",target,D3DCOMPILE_ENABLE_STRICTNESS|D3DCOMPILE_OPTIMIZATION_LEVEL3,
+        "main",target,wxl::water::slot3::shaders::kLegacySm3CompileFlags,
         0,&code,&errors);
     if (errors) {
         std::fwrite(errors->GetBufferPointer(),1,errors->GetBufferSize(),stdout);
@@ -30,7 +33,7 @@ static bool Compile(const char* source, const char* target, const char* name) {
         valid=text.find(target)!=std::string::npos;
         if (std::strcmp(target,"ps_3_0")==0) {
             // Verify the exact resource slots survive actual compilation.
-            for (const char* slot : {"dcl_2d s0","dcl_2d s1","dcl_2d s5","dcl_2d s6","dcl_2d s7"})
+            for (const char* slot : slots)
                 valid=valid && text.find(slot)!=std::string::npos;
         }
         const std::string filename=std::string(name)+".asm";
@@ -45,6 +48,9 @@ static bool Compile(const char* source, const char* target, const char* name) {
 }
 int main() {
     const bool vs=Compile(wxl::water::slot3::shaders::kVertexHlsl,"vs_3_0","R6_ProcWater_VS0");
-    const bool ps=Compile(wxl::water::slot3::shaders::kPixelHlsl,"ps_3_0","R6_ProcWaterAbove_PS3");
-    return vs&&ps ? 0:1;
+    const bool ps=Compile(wxl::water::slot3::shaders::kPixelHlsl,"ps_3_0","R6_ProcWaterAbove_PS3",
+        {"dcl_2d s0","dcl_2d s1","dcl_2d s5","dcl_2d s6","dcl_2d s7"});
+    const bool depth=Compile(wxl::water::slot3::shaders::kLinearDepthHlsl,"ps_3_0","R6_LinearDepth_PS",
+        {"dcl_2d s0"});
+    return vs&&ps&&depth ? 0:1;
 }
