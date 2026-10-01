@@ -78,7 +78,7 @@ class PE:
         if len(data) < 0x100 or data[:2] != b"MZ":
             raise ValueError("not an MZ executable")
         pe = struct.unpack_from("<I", data, 0x3C)[0]
-        if data[pe:pe + 4] != b"PE\\0\\0":
+        if data[pe:pe + 4] != bytes.fromhex("50450000"):
             raise ValueError("missing PE signature")
         self.pe = pe
         self.sections_count = struct.unpack_from("<H", data, pe + 6)[0]
@@ -93,7 +93,7 @@ class PE:
         self.sections = []
         for i in range(self.sections_count):
             p = sec + i * 40
-            name = data[p:p + 8].split(b"\\0", 1)[0].decode("ascii", "replace")
+            name = data[p:p + 8].split(bytes([0]), 1)[0].decode("ascii", "replace")
             vsize, va, raw_size, raw_ptr = struct.unpack_from("<IIII", data, p + 8)
             self.sections.append((name, va, max(vsize, raw_size), raw_ptr, raw_size))
 
