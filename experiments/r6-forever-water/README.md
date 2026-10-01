@@ -1,7 +1,7 @@
 # R6 Forever Water Companion Qualification
 
-This directory defines the first reversible R6 pivot candidate based on
-`jealous-sound/coa-vfog`.
+This directory defines the R6 production-compatibility candidate based on
+`jealous-sound/coa-vfog`, layered additively over the frozen R0-R5 runtime.
 
 ## Frozen authority
 
@@ -26,7 +26,8 @@ the upstream LICENSE and exact commit identity.
 
 The supplied INI intentionally enables modern water while disabling or
 neutralising CoAVolFog's fog, Classic fog data use, local-light fog, god rays,
-Forever glow, colour grading and far-clip override.
+Forever glow, colour grading and far-clip override. The visually qualified
+reflection multiplier is locked at `WaterReflections=0.75`.
 
 The intentional R6 visual delta is therefore water only:
 
@@ -40,25 +41,37 @@ The intentional R6 visual delta is therefore water only:
 
 Magma, slime and unsupported liquids remain native.
 
-## Important compatibility gate
+## R0-R5 compatibility delta
 
-This is a companion qualification candidate, not an accepted production
-install. CoAVolFog wraps Direct3D9 above the existing D3D9 implementation and
-has its own readable-depth/MSAA handling. Therefore R3 AO/SMAA, R4 environment
-and R5 shadows must be requalified in-game before this path can be accepted.
+The accepted `Wow.exe`, `d3d9.dll` and `WarcraftXL.dll` remain byte-for-byte
+untouched. The CI build applies a small patch only to the pinned CoAVolFog
+source before compiling the companion:
+
+- on DXVK/another non-system D3D9 implementation, keep the game's requested
+  multisampling and use a runtime-self-tested two-stage depth transport:
+  multisampled native depth -> single-sample same-format depth -> INTZ;
+- the transport deliberately uses the same two-stage StretchRect shape already
+  live-proven by WarcraftXL R6 diagnostics;
+- when the exact R6 water-only profile has all fog density sources at zero,
+  skip the fog preparation/composite path entirely while retaining the readable
+  depth substrate needed by water.
+
+The existing CoAVolFog depth-copy self-test remains authoritative. If the
+two-stage route fails on the live device, the candidate is not accepted.
 
 Rollback is deletion of only the companion files added by the candidate.
 The accepted WarcraftXL.dll, d3d9.dll and Wow.exe must not be replaced.
 
 ## Candidate order
 
-1. Build and pass the upstream harness.
+1. Build the pinned upstream plus the reviewed WarcraftXL compatibility delta.
 2. Preserve and hash the current DEV client.
-3. Add only version.dll, CoAVolFog.dll, CoAVolFog.ini, waterdata.bin and
-   fogdata.bin.
-4. Launch with the existing accepted R0-R5/R6-off options; do not add the old
-   Classic-water replacement flag.
-5. Verify startup log and modern water.
-6. Requalify R3 AO/SMAA, R4 grass/environment and R5 shadows.
-7. If any frozen phase regresses, remove the companion files and return to the
-   accepted runtime before changing source.
+3. Replace only the five R6 companion files; never replace frozen R0-R5 files.
+4. Launch with the existing accepted R0-R5 options plus `version=n,b`.
+5. Require the live log to report 8x multisampling retained by the WXL
+   two-stage StretchRect path and a passing depth-copy self-test.
+6. Verify water remains visually equivalent to the qualified build, with
+   reflections at 0.75.
+7. Require the water-only profile to skip fog rendering rather than spending
+   GPU time on a zero-effect composite.
+8. Requalify the frozen visual stack before freezing R6.
