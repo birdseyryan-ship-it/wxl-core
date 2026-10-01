@@ -1,0 +1,66 @@
+name: R7 Outline Diagnostic Qualification
+on:
+  push:
+    branches: ['gfx-r7-r4-distant-outline-fix-20261001']
+    paths:
+      - 'src/client/CWorldScene/*Outline*'
+      - 'tools/r7-outline-check/**'
+      - 'experiments/r7-outline/**'
+      - '.github/workflows/r7-outline-diagnostics.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  qualify:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Build Win32 WarcraftXL only
+        run: |
+          cmake -S . -B build-r7 -A Win32
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build build-r7 --config Release --target WarcraftXL --parallel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Check Win32 observation policy and evidence integrity
+        run: |
+          cmake -S tools/r7-outline-check -B build-r7check -A Win32
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build build-r7check --config Release --parallel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./build-r7check/Release/R7OutlineCheck.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m unittest discover -s tools/r7-outline-check -p 'test_*.py' -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Qualify frozen R5 receiver assembly
+        run: |
+          cmake -S tools/r5-receiver-check -B build-r5check -A Win32
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build build-r5check --config Release --parallel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./build-r5check/Release/R5ReceiverSmoke.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Stage candidate and exact authority
+        run: |
+          New-Item -ItemType Directory -Force dist-r7 | Out-Null
+          Copy-Item build-r7/Release/WarcraftXL.dll dist-r7/WarcraftXL.dll
+          Copy-Item experiments/r7-outline/* dist-r7/
+          Copy-Item tools/r7-outline-check/audit_outline.py dist-r7/
+          $sha = (git rev-parse HEAD).Trim()
+          $parent = (git rev-parse HEAD^).Trim()
+          @{commit=$sha; parent=$parent; artifact="WarcraftXL.dll only"; live_qualified=$false} | ConvertTo-Json | Set-Content dist-r7/SOURCE_AUTHORITY.json
+          Get-ChildItem dist-r7 -File | Where-Object Name -ne SHA256SUMS.txt | ForEach-Object {
+            $h=(Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+            "$h  $($_.Name)" | Add-Content dist-r7/SHA256SUMS.txt
+          }
+          Get-Content dist-r7/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: r7-outline-candidate-${{ github.sha }}
+          path: dist-r7/
+          if-no-files-found: error
+          retention-days: 30
