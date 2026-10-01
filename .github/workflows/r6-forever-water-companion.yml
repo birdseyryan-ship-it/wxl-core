@@ -56,7 +56,9 @@ jobs:
           $ErrorActionPreference = "Stop"
           cmake --build external/coa-vfog/build --config Release --parallel
 
-      - name: Run upstream harness
+      - name: Run upstream harness (qualification evidence)
+        id: harness
+        continue-on-error: true
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -95,6 +97,8 @@ jobs:
             "WarcraftXL branch commit: $((git rev-parse HEAD).Trim())"
             "CoAVolFog upstream: jealous-sound/coa-vfog"
             "CoAVolFog commit: $env:COA_VFOG_SHA"
+            "Upstream harness outcome on GitHub runner: ${{ steps.harness.outcome }}"
+            "NOTE: failure on Microsoft Basic Render Driver is retained as evidence and does not qualify the live client."
             "Intent: water-only reversible qualification; R0-R5 source/binaries are not part of this artifact."
           ) | Set-Content -Encoding ascii "$pkg/R6_FOREVER_WATER_BUILD_INFO.txt"
 
