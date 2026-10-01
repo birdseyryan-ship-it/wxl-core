@@ -87,6 +87,8 @@ jobs:
           Copy-Item "external/coa-vfog/data/waterdata.bin" "$pkg/waterdata.bin"
           Copy-Item "external/coa-vfog/data/fogdata.bin" "$pkg/fogdata.bin"
           Copy-Item "experiments/r6-forever-water/CoAVolFog-R6-WaterOnly.ini" "$pkg/CoAVolFog.ini"
+          Copy-Item "experiments/r6-forever-water/preflight_coavolfog_water.py" "$pkg/preflight_coavolfog_water.py"
+          Copy-Item "experiments/r6-forever-water/README.md" "$pkg/R6_FOREVER_WATER_README.md"
           if (Test-Path "external/coa-vfog/LICENSE") {
             Copy-Item "external/coa-vfog/LICENSE" "$pkg/LICENSE-CoAVolFog"
           }
