@@ -77,11 +77,6 @@ def main() -> int:
         return {DepthCopyMethod::None, "d3d9.dll is not the system copy (DXVK or another wrapper), so NVAPI cannot "
                                        "copy its depth"};""",
         """    if (!LoadedFromSystemFolder(FirstMethodOf(d3d)))
-        // WarcraftXL's accepted DXVK path has already live-proven a two-stage
-        // depth transport at the pre-water boundary:
-        // MSAA native depth -> single-sample same-format depth -> INTZ.
-        // Advertise that route here and let the existing CoAVolFog depth-copy
-        // self-test qualify it on the actual device before the game sees it.
         return {DepthCopyMethod::WxlStretch, ""};""",
     )
 
@@ -178,10 +173,6 @@ def main() -> int:
         return ResolveThroughResz(dev, m_destination);
     case DepthCopyMethod::WxlStretch:
     {
-        // DXVK/WarcraftXL qualification path. D3D9 depth StretchRect is
-        // performed outside an open scene, matching WarcraftXL's already
-        // accepted R6 transport bracket. Always reopen the scene after a
-        // successful EndScene, even when either copy fails.
         if (!m_intermediate || FAILED(dev->EndScene()))
             return false;
 
@@ -218,10 +209,6 @@ def main() -> int:
 
 bool R6WaterOnlyFogDisabled(const Config& cfg)
 {
-    // Exact shipped R6 policy: retain the depth/device substrate required by
-    // modern water, but do not execute an otherwise zero-effect fog pipeline.
-    // As soon as R7 enables any fog density source, debug view or god rays,
-    // this automatically stops matching and upstream fog rendering resumes.
     return cfg.dataMode == 0 &&
            cfg.density <= 0.0f &&
            cfg.haze <= 0.0f &&
