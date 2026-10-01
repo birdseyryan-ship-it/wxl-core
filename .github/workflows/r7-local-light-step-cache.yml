@@ -1,0 +1,125 @@
+name: R7 Local Light Step Cache Research
+
+on:
+  push:
+    branches:
+      - gfx-r7-r4-distant-outline-fix-20261001
+    paths:
+      - ".github/workflows/r7-local-light-step-cache.yml"
+      - "experiments/r7-local-lights/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-research-candidate:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [baseline, cached]
+    env:
+      COA_VFOG_SHA: 4e31ddf53a326ba9c0ad03488b4c30f7ce23c969
+      COA_VFOG_TEST_ROOT: ${{ github.workspace }}/external/coa-vfog
+    steps:
+      - name: Checkout reviewed WXL source
+        uses: actions/checkout@v4
+      - name: Checkout pinned CoAVolFog
+        uses: actions/checkout@v4
+        with:
+          repository: jealous-sound/coa-vfog
+          ref: ${{ env.COA_VFOG_SHA }}
+          path: external/coa-vfog
+      - name: Prepare exact frozen compatibility plus research variant
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          python experiments/r7-local-lights/test_local_lights.py
+          if ($LASTEXITCODE -ne 0) { throw "Portable research checks failed" }
+          python experiments/r6-forever-water/patch_coavolfog_for_wxl_r6.py external/coa-vfog
+          if ($LASTEXITCODE -ne 0) { throw "Frozen compatibility patch failed" }
+          python experiments/r7-local-lights/patch_coavolfog_step_cache.py external/coa-vfog --variant ${{ matrix.variant }}
+          if ($LASTEXITCODE -ne 0) { throw "Research patch failed" }
+          git -C external/coa-vfog diff --check
+          if ($LASTEXITCODE -ne 0) { throw "Whitespace check failed" }
+          python external/coa-vfog/tools/check_comments.py
+          if ($LASTEXITCODE -ne 0) { throw "Comment check failed" }
+      - name: Compile Win32 DLL and all SM3 shaders
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          cmake -S external/coa-vfog -B external/coa-vfog/build -G "Visual Studio 17 2022" -A Win32
+          if ($LASTEXITCODE -ne 0) { throw "Configure failed" }
+          cmake --build external/coa-vfog/build --config Release --parallel
+          if ($LASTEXITCODE -ne 0) { throw "Build failed" }
+      - name: Run offline regression harness
+        id: harness
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          ctest --test-dir external/coa-vfog/build -C Release --output-on-failure
+          if ($LASTEXITCODE -ne 0) { throw "Harness failed; inspect artifact before qualification" }
+      - name: Prepare offline research artifact
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $pkg = "r7-local-light-${{ matrix.variant }}-research"
+          New-Item -ItemType Directory -Force $pkg | Out-Null
+          Copy-Item external/coa-vfog/build/Release/CoAVolFog.dll $pkg
+          Copy-Item external/coa-vfog/build/Release/vfog_harness.exe $pkg
+          Copy-Item external/coa-vfog/data/fogdata.bin $pkg
+          Copy-Item external/coa-vfog/data/waterdata.bin $pkg
+          Copy-Item external/coa-vfog/build/shaders -Destination "$pkg/shaders" -Recurse
+          Copy-Item experiments/r7-local-lights/README.md $pkg
+          if (Test-Path external/coa-vfog/build/Testing/Temporary) {
+            Copy-Item external/coa-vfog/build/Testing/Temporary -Destination "$pkg/ctest" -Recurse
+          }
+          @(
+            "NOT A LIVE INSTALL PACKAGE. No game-client deployment has been qualified."
+            "WXL source: ${{ github.sha }}"
+            "CoAVolFog pinned source: $env:COA_VFOG_SHA"
+            "Research variant: ${{ matrix.variant }}"
+            "Offline harness outcome: ${{ steps.harness.outcome }}"
+            "A Basic Render Driver pass/failure does not qualify RTX 5060 Proton/DXVK rendering."
+            "Required: paired 3840x2160 8x-MSAA GPU timing, shader-bytecode comparison, live screenshots."
+          ) | Set-Content -Encoding ascii "$pkg/NOT_A_LIVE_INSTALL_PACKAGE.txt"
+          Get-ChildItem $pkg -File -Recurse | Sort-Object FullName | ForEach-Object {
+            $relative = [IO.Path]::GetRelativePath((Resolve-Path $pkg).Path, $_.FullName).Replace('\', '/')
+            "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $relative
+          } | Set-Content -Encoding ascii "$pkg/SHA256SUMS.txt"
+      - name: Upload research artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: r7-local-light-${{ matrix.variant }}-research-${{ github.sha }}
+          path: r7-local-light-${{ matrix.variant }}-research/
+          if-no-files-found: error
+          retention-days: 14
+
+  compare-frozen-shaders:
+    needs: build-research-candidate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout comparator
+        uses: actions/checkout@v4
+      - name: Download paired research artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: r7-local-light-*-research-${{ github.sha }}
+          path: paired
+      - name: Verify unchanged unlit and water shader bytecode
+        run: >-
+          python experiments/r7-local-lights/compare_shader_artifacts.py
+          paired/r7-local-light-baseline-research-${{ github.sha }}
+          paired/r7-local-light-cached-research-${{ github.sha }}
+          --output R7_SHADER_BYTECODE_COMPARISON.json
+      - name: Upload comparison evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r7-local-light-bytecode-comparison-${{ github.sha }}
+          path: R7_SHADER_BYTECODE_COMPARISON.json
+          if-no-files-found: warn
+          retention-days: 14
