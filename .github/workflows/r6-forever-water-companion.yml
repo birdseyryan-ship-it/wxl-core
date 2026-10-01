@@ -1,0 +1,114 @@
+name: R6 Forever Water Companion
+
+on:
+  push:
+    branches:
+      - gfx-r6-forever-water-companion-20261001
+    paths:
+      - ".github/workflows/r6-forever-water-companion.yml"
+      - "experiments/r6-forever-water/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-water-companion:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    env:
+      COA_VFOG_SHA: 4e31ddf53a326ba9c0ad03488b4c30f7ce23c969
+      WXL_BASE_SHA: 1f03309da4639771d74c8957c85bd9653069b7c4
+
+    steps:
+      - name: Checkout WarcraftXL qualification branch
+        uses: actions/checkout@v4
+
+      - name: Checkout pinned CoAVolFog
+        uses: actions/checkout@v4
+        with:
+          repository: jealous-sound/coa-vfog
+          ref: ${{ env.COA_VFOG_SHA }}
+          path: external/coa-vfog
+
+      - name: Verify source identities
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $coa = (git -C external/coa-vfog rev-parse HEAD).Trim()
+          if ($coa -ne $env:COA_VFOG_SHA) {
+            throw "CoAVolFog SHA mismatch: $coa"
+          }
+          $wxl = (git rev-parse HEAD).Trim()
+          Write-Host "WarcraftXL branch commit: $wxl"
+          Write-Host "Pinned WarcraftXL base:  $env:WXL_BASE_SHA"
+          Write-Host "Pinned CoAVolFog:        $coa"
+
+      - name: Configure CoAVolFog Win32
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          cmake -S external/coa-vfog -B external/coa-vfog/build -G "Visual Studio 17 2022" -A Win32
+
+      - name: Build CoAVolFog Release
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          cmake --build external/coa-vfog/build --config Release --parallel
+
+      - name: Run upstream harness
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          ctest --test-dir external/coa-vfog/build -C Release --output-on-failure
+
+      - name: Package R6 water-only candidate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $pkg = "r6-forever-water-companion"
+          New-Item -ItemType Directory -Force -Path $pkg | Out-Null
+
+          $required = @(
+            "external/coa-vfog/build/Release/version.dll",
+            "external/coa-vfog/build/Release/CoAVolFog.dll",
+            "external/coa-vfog/data/waterdata.bin",
+            "external/coa-vfog/data/fogdata.bin",
+            "experiments/r6-forever-water/CoAVolFog-R6-WaterOnly.ini"
+          )
+          foreach ($path in $required) {
+            if (!(Test-Path $path)) { throw "Missing required package input: $path" }
+          }
+
+          Copy-Item "external/coa-vfog/build/Release/version.dll" "$pkg/version.dll"
+          Copy-Item "external/coa-vfog/build/Release/CoAVolFog.dll" "$pkg/CoAVolFog.dll"
+          Copy-Item "external/coa-vfog/data/waterdata.bin" "$pkg/waterdata.bin"
+          Copy-Item "external/coa-vfog/data/fogdata.bin" "$pkg/fogdata.bin"
+          Copy-Item "experiments/r6-forever-water/CoAVolFog-R6-WaterOnly.ini" "$pkg/CoAVolFog.ini"
+          if (Test-Path "external/coa-vfog/LICENSE") {
+            Copy-Item "external/coa-vfog/LICENSE" "$pkg/LICENSE-CoAVolFog"
+          }
+
+          @(
+            "R6 Forever Water Companion"
+            "WarcraftXL qualified base: $env:WXL_BASE_SHA"
+            "WarcraftXL branch commit: $((git rev-parse HEAD).Trim())"
+            "CoAVolFog upstream: jealous-sound/coa-vfog"
+            "CoAVolFog commit: $env:COA_VFOG_SHA"
+            "Intent: water-only reversible qualification; R0-R5 source/binaries are not part of this artifact."
+          ) | Set-Content -Encoding ascii "$pkg/R6_FOREVER_WATER_BUILD_INFO.txt"
+
+          $hashes = Get-ChildItem $pkg -File | Sort-Object Name | ForEach-Object {
+            $h = Get-FileHash -Algorithm SHA256 $_.FullName
+            "{0}  {1}" -f $h.Hash.ToLowerInvariant(), $_.Name
+          }
+          $hashes | Set-Content -Encoding ascii "$pkg/SHA256SUMS.txt"
+          Get-Content "$pkg/SHA256SUMS.txt"
+
+      - name: Upload R6 companion artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: r6-forever-water-companion-${{ github.sha }}
+          path: r6-forever-water-companion/
+          if-no-files-found: error
+          retention-days: 14
