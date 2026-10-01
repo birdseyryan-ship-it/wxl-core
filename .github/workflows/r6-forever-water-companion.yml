@@ -1,9 +1,9 @@
-name: R6 Forever Water Companion
+name: R6 Forever Water R0-R5 Compatibility
 
 on:
   push:
     branches:
-      - gfx-r6-forever-water-companion-20261001
+      - gfx-r6-forever-water-r0r5-compat-20261001
     paths:
       - ".github/workflows/r6-forever-water-companion.yml"
       - "experiments/r6-forever-water/**"
@@ -44,6 +44,14 @@ jobs:
           Write-Host "Pinned WarcraftXL base:  $env:WXL_BASE_SHA"
           Write-Host "Pinned CoAVolFog:        $coa"
 
+      - name: Apply WarcraftXL R6 compatibility patch
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          python experiments/r6-forever-water/patch_coavolfog_for_wxl_r6.py external/coa-vfog
+          git -C external/coa-vfog diff --check
+          git -C external/coa-vfog diff -- src/msaa_depth.h src/msaa_depth.cpp src/d3d9_wrap.cpp
+
       - name: Configure CoAVolFog Win32
         shell: pwsh
         run: |
@@ -68,7 +76,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $pkg = "r6-forever-water-companion"
+          $pkg = "r6-forever-water-r0r5-compat"
           New-Item -ItemType Directory -Force -Path $pkg | Out-Null
 
           $required = @(
@@ -94,14 +102,18 @@ jobs:
           }
 
           @(
-            "R6 Forever Water Companion"
+            "R6 Forever Water R0-R5 Compatibility Candidate"
             "WarcraftXL qualified base: $env:WXL_BASE_SHA"
             "WarcraftXL branch commit: $((git rev-parse HEAD).Trim())"
             "CoAVolFog upstream: jealous-sound/coa-vfog"
             "CoAVolFog commit: $env:COA_VFOG_SHA"
+            "WaterReflections locked: 0.75"
+            "Compatibility delta: WXL two-stage StretchRect MSAA depth transport candidate"
+            "Compatibility delta: zero-effect fog pass skipped under exact R6 water-only profile"
             "Upstream harness outcome on GitHub runner: ${{ steps.harness.outcome }}"
-            "NOTE: failure on Microsoft Basic Render Driver is retained as evidence and does not qualify the live client."
-            "Intent: water-only reversible qualification; R0-R5 source/binaries are not part of this artifact."
+            "NOTE: Microsoft Basic Render Driver does not qualify the live Proton/DXVK path."
+            "Intent: additive water-only companion; R0-R5 source/binaries are not part of this artifact."
+            "LIVE GATE REQUIRED: 8x MSAA retained, depth self-test pass, water shaded, frozen hashes unchanged."
           ) | Set-Content -Encoding ascii "$pkg/R6_FOREVER_WATER_BUILD_INFO.txt"
 
           $hashes = Get-ChildItem $pkg -File | Sort-Object Name | ForEach-Object {
@@ -114,7 +126,7 @@ jobs:
       - name: Upload R6 companion artifact
         uses: actions/upload-artifact@v4
         with:
-          name: r6-forever-water-companion-${{ github.sha }}
-          path: r6-forever-water-companion/
+          name: r6-forever-water-r0r5-compat-${{ github.sha }}
+          path: r6-forever-water-r0r5-compat/
           if-no-files-found: error
           retention-days: 14
