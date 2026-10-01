@@ -11,6 +11,8 @@ Apply the existing frozen `experiments/r6-forever-water/patch_coavolfog_for_wxl_
 first. The R7 patch refuses source whose depth header, depth transport or wrapper
 does not exactly match that accepted compatibility patch. It does not write
 those files, water code/shaders/data, R4/R5, Wow.exe, d3d9.dll or a client folder.
+Source identity hashes normalise CRLF to LF for Windows checkout compatibility;
+binary hashes remain over raw bytes. The actual depth/wrapper files are not rewritten.
 
 The current accepted INI remains LocalLights=0, Quality=2, Temporal=.85,
 WaterQuality=3, reflections=.75, farclip 2112 and native 8x MSAA.
@@ -116,9 +118,10 @@ install/rollback package come only after build, equivalence and GPU gates pass.
 
 ## Local validation
 
-Eight Python checks cover log attribution/settings transitions, fail-closed source
+Nine Python checks cover log attribution/settings transitions, fail-closed source
 identity, preservation of the accepted depth files, read-only preparation and
-refusal to overwrite another payload, and bytecode/data comparison guards. The operation model builds with GCC using
+refusal to overwrite another payload, Windows line endings, and bytecode/data
+comparison guards. The operation model builds with GCC using
 warnings as errors. The patched upstream comment checker and diff whitespace
 check pass. Windows DLL/FXC compilation, D3D9 harness, GPU benchmark and live 4K
 visual qualification remain NOT RUN.

@@ -150,6 +150,18 @@ class PatchTests(unittest.TestCase):
             patcher.prepare(self.target, "cached")
         self.assertEqual(payload.read_text(encoding="utf-8"), "existing")
 
+    def test_crlf_source_checkout_is_accepted_without_rewriting_depth(self):
+        self.r6()
+        for name in patcher.REQUIRED:
+            path = self.target / name
+            path.write_bytes(patcher.source_bytes(path).replace(b"\n", b"\r\n"))
+        depth = self.target / "src/msaa_depth.cpp"
+        before = depth.read_bytes()
+        changes = patcher.prepare(self.target, "cached")
+        self.assertNotIn(depth, changes)
+        self.assertEqual(before, depth.read_bytes())
+        self.assertNotIn(b"\r\n", changes[self.target / "shaders/vf_integrate.hlsli"])
+
 
 if __name__ == "__main__":
     unittest.main()

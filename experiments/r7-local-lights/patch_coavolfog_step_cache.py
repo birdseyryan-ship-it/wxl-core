@@ -26,16 +26,20 @@ def replace_once(value: str, old: str, new: str) -> str:
     return value.replace(old, new, 1)
 
 
+def source_bytes(path: Path) -> bytes:
+    return path.read_bytes().replace(b"\r\n", b"\n")
+
+
 def prepare(root: Path, variant: str) -> dict[Path, bytes]:
     head = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
     top = subprocess.check_output(["git", "-C", str(root), "rev-parse", "--show-toplevel"], text=True).strip()
     if head != PINNED or Path(top).resolve() != root:
         raise ValueError("the target must be the pinned CoAVolFog repository root")
     for name, expected in REQUIRED.items():
-        if hashlib.sha256((root / name).read_bytes()).hexdigest() != expected:
+        if hashlib.sha256(source_bytes(root / name)).hexdigest() != expected:
             raise ValueError(f"source identity mismatch: {name}; apply only the frozen WXL R6 patch first")
     additions = {
-        root / "tests/r7_step_cache_checks.h": (PAYLOAD / "r7_step_cache_checks.h").read_bytes(),
+        root / "tests/r7_step_cache_checks.h": source_bytes(PAYLOAD / "r7_step_cache_checks.h"),
         root / "tests/shaders/r7_reference_march.hlsl":
             b'#define WXL_R7_STEP_CACHE 0\n#include "../../shaders/vf_march.hlsl"\n',
     }
