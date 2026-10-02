@@ -223,5 +223,88 @@ class StructuralMaterialSourceTest(unittest.TestCase):
         )
 
 
+    def test_11b02a_selector_proof_is_explicitly_opt_in(self):
+        self.assertIn(
+            '"WXL_R8_WMO_SELECTOR_PROOF"',
+            RUNTIME,
+        )
+        self.assertIn(
+            "if (g_config.wmoSelectorProof)",
+            RUNTIME,
+        )
+
+    def test_11b02a_reads_active_collection_slots_directly(self):
+        self.assertIn(
+            "sh::kCollectionVtxSlots",
+            RUNTIME,
+        )
+        self.assertIn(
+            "sh::kCollectionPixSlots",
+            RUNTIME,
+        )
+        self.assertIn(
+            "SnapshotCollectionWrapper",
+            RUNTIME,
+        )
+
+    def test_11b02a_hashes_wrapper_bytecode_not_hardware_shader(self):
+        self.assertIn(
+            "sh::kCgxShaderByteLen",
+            RUNTIME,
+        )
+        self.assertIn(
+            "sh::kCgxShaderBytePtr",
+            RUNTIME,
+        )
+        self.assertIn(
+            "diag::Sha256::Of",
+            RUNTIME,
+        )
+        self.assertNotIn(
+            "GetVertexShader(",
+            RUNTIME,
+        )
+        self.assertNotIn(
+            "GetPixelShader(",
+            RUNTIME,
+        )
+
+    def test_11b02a_records_even_raw_vertex_sibling(self):
+        self.assertIn(
+            "vtxIdx & ~1u",
+            RUNTIME,
+        )
+        self.assertIn(
+            "paired_raw_vtx",
+            RUNTIME,
+        )
+        self.assertIn(
+            "paired_vs_sha",
+            RUNTIME,
+        )
+
+    def test_11b02a_remains_read_only(self):
+        forbidden = (
+            "kGxStateSet",
+            "SetVertexShader",
+            "SetPixelShader",
+            "SetVertexShaderConstantF",
+            "SetPixelShaderConstantF",
+            "CreateVertexShader",
+            "CreatePixelShader",
+            "D3DAssemble",
+            "kShaderConstantsSet",
+            "mem::Patch",
+            "VirtualProtect",
+        )
+
+        for token in forbidden:
+            self.assertNotIn(
+                token,
+                RUNTIME,
+                token,
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

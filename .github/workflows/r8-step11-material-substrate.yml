@@ -1,4 +1,4 @@
-name: R8 Step11 Structural Material Substrate
+name: R8 Step11 WMO Selector Proof
 
 on:
   push:
@@ -14,7 +14,7 @@ defaults:
     shell: pwsh
 
 jobs:
-  qualify-step11b01:
+  qualify-step11b02a:
     runs-on: windows-latest
 
     steps:
@@ -92,16 +92,17 @@ jobs:
             commit = "$env:GITHUB_SHA"
             parent = "$parent"
             tree = "$tree"
+            required_parent = "8c0df77f155107a1a4b536609b8a273a8bdda35a"
             required_base = "1f03309da4639771d74c8957c85bd9653069b7c4"
-            step = "R8_STEP11B01"
-            mode = "default_off_dry_run_substrate"
-            default_hooks_installed = $false
+            step = "R8_STEP11B02A"
+            mode = "read_only_collection_slot_selector_proof"
             d3d_mutation = $false
+            shader_substitution = $false
             gx_device_draw_owner = $false
-            m2_seam = "post_native_setup_material"
-            wmo_seam = "scoped_post_native_effect_bind"
-            unknown_routes = "stock_fallback"
-            m2_8002 = "explicitly_deferred"
+            selector_source = "active_effect_collection_wrapper_slots"
+            hardware_shader_snapshot_used_for_identity = $false
+            vertex_pair_rule = "selected_vtx_index_even_sibling"
+            unknown_routes = "observation_only_no_replacement"
           }
 
           $authority |
@@ -111,10 +112,10 @@ jobs:
           Get-Content "dist-step11\SHA256SUMS.txt"
           Get-Content "dist-step11\SOURCE_AUTHORITY.json"
 
-      - name: Upload Step11B01 candidate
+      - name: Upload Step11B02A candidate
         uses: actions/upload-artifact@v4
         with:
-          name: r8-step11b01-material-substrate-${{ github.sha }}
+          name: r8-step11b02a-wmo-selector-proof-${{ github.sha }}
           path: |
             dist-step11/WarcraftXL.dll
             dist-step11/SHA256SUMS.txt

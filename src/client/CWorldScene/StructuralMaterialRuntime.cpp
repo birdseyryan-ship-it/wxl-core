@@ -24,23 +24,28 @@
 #include "offsets/engine/Shader.hpp"
 #include "offsets/game/M2.hpp"
 #include "offsets/game/WMO.hpp"
+#include "water/WaterDiagCore.hpp"
 
 #include <windows.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <vector>
 
 namespace wxl::r8::materials
 {
     namespace
     {
-        namespace m2  = wxl::offsets::game::m2;
-        namespace sh  = wxl::offsets::engine::shader;
-        namespace wmo = wxl::offsets::game::wmo;
+        namespace diag = wxl::waterdiag;
+        namespace m2   = wxl::offsets::game::m2;
+        namespace sh   = wxl::offsets::engine::shader;
+        namespace wmo  = wxl::offsets::game::wmo;
 
         constexpr std::uintptr_t kCanonicalImageBase = 0x00400000u;
         constexpr int kOuterAfterNativePriority = -500;
@@ -51,6 +56,7 @@ namespace wxl::r8::materials
             bool master = false;
             bool wmo = false;
             bool m2 = false;
+            bool wmoSelectorProof = false;
         };
 
         Config g_config{};
@@ -62,6 +68,7 @@ namespace wxl::r8::materials
         sh::EffectBindFn g_origWmoEffectBind = nullptr;
 
         thread_local unsigned g_wmoRenderDepth = 0;
+        thread_local std::uintptr_t g_wmoRoot = 0;
 
         std::atomic<bool> g_loggedM2Seam{false};
         std::atomic<bool> g_loggedWmoDiffuse{false};
@@ -122,6 +129,7 @@ namespace wxl::r8::materials
             bool masterValid = true;
             bool wmoValid = true;
             bool m2Valid = true;
+            bool selectorProofValid = true;
 
             out.master =
                 ReadBoolEnvironment(
@@ -138,10 +146,16 @@ namespace wxl::r8::materials
                     "WXL_R8_M2_MATERIALS",
                     m2Valid);
 
+            out.wmoSelectorProof =
+                ReadBoolEnvironment(
+                    "WXL_R8_WMO_SELECTOR_PROOF",
+                    selectorProofValid);
+
             out.valid =
                 masterValid &&
                 wmoValid &&
-                m2Valid;
+                m2Valid &&
+                selectorProofValid;
 
             return out;
         }
@@ -209,6 +223,348 @@ namespace wxl::r8::materials
             }
 
             return WmoFamily::Unknown;
+        }
+
+        struct WrapperSnapshot
+        {
+            std::uint32_t pointer = 0;
+            std::uint32_t byteLength = 0;
+            std::uint32_t version = 0;
+            bool valid = false;
+            diag::Digest sha{};
+        };
+
+        struct SelectorObservation
+        {
+            WmoFamily family = WmoFamily::Unknown;
+            std::uint32_t vtxIdx = 0;
+            std::uint32_t pixIdx = 0;
+            std::uint32_t selectedVs = 0;
+            std::uint32_t pairedRawVs = 0;
+            std::uint32_t selectedPs = 0;
+        };
+
+        std::array<SelectorObservation, 64>
+            g_selectorObservations{};
+
+        std::size_t g_selectorObservationCount = 0;
+        bool g_selectorLimitLogged = false;
+
+        bool ReadClientMemory(
+            std::uintptr_t address,
+            void* destination,
+            std::size_t bytes)
+        {
+            if (
+                !address ||
+                !destination ||
+                bytes == 0)
+            {
+                return false;
+            }
+
+            SIZE_T copied = 0;
+
+            return
+                ReadProcessMemory(
+                    GetCurrentProcess(),
+                    reinterpret_cast<const void*>(address),
+                    destination,
+                    bytes,
+                    &copied) &&
+                copied == bytes;
+        }
+
+        template<class T>
+        bool ReadClientValue(
+            std::uintptr_t address,
+            T& value)
+        {
+            return
+                ReadClientMemory(
+                    address,
+                    &value,
+                    sizeof(value));
+        }
+
+        WrapperSnapshot SnapshotCollectionWrapper(
+            std::uint32_t collection,
+            std::size_t slotsOffset,
+            std::uint32_t index,
+            std::uint32_t slotCount)
+        {
+            WrapperSnapshot out{};
+
+            if (
+                !collection ||
+                index >= slotCount)
+            {
+                return out;
+            }
+
+            std::uint32_t wrapper = 0;
+
+            if (
+                !ReadClientValue(
+                    static_cast<std::uintptr_t>(collection) +
+                        slotsOffset +
+                        static_cast<std::uintptr_t>(index) *
+                            sizeof(std::uint32_t),
+                    wrapper) ||
+                !wrapper)
+            {
+                return out;
+            }
+
+            out.pointer = wrapper;
+
+            std::uint32_t length = 0;
+            std::uint32_t bytecode = 0;
+
+            if (
+                !ReadClientValue(
+                    static_cast<std::uintptr_t>(wrapper) +
+                        sh::kCgxShaderByteLen,
+                    length) ||
+                !ReadClientValue(
+                    static_cast<std::uintptr_t>(wrapper) +
+                        sh::kCgxShaderBytePtr,
+                    bytecode) ||
+                !bytecode ||
+                length < sizeof(std::uint32_t) ||
+                length > 0x20000u)
+            {
+                return out;
+            }
+
+            std::vector<std::uint8_t> bytes(
+                length);
+
+            if (
+                !ReadClientMemory(
+                    bytecode,
+                    bytes.data(),
+                    bytes.size()))
+            {
+                return out;
+            }
+
+            std::memcpy(
+                &out.version,
+                bytes.data(),
+                sizeof(out.version));
+
+            out.byteLength = length;
+            out.sha =
+                diag::Sha256::Of(
+                    bytes.data(),
+                    bytes.size());
+
+            out.valid = true;
+
+            return out;
+        }
+
+        std::string SnapshotHash(
+            const WrapperSnapshot& snapshot)
+        {
+            return
+                snapshot.valid
+                    ? diag::Hex(snapshot.sha)
+                    : std::string("UNAVAILABLE");
+        }
+
+        std::string CurrentWmoPath()
+        {
+            if (!g_wmoRoot)
+                return "UNKNOWN";
+
+            std::array<char, 260> path{};
+
+            if (
+                !ReadClientMemory(
+                    g_wmoRoot +
+                        wmo::kOffNameInline,
+                    path.data(),
+                    path.size()))
+            {
+                return "UNAVAILABLE";
+            }
+
+            const auto end =
+                std::find(
+                    path.begin(),
+                    path.end(),
+                    '\0');
+
+            if (end == path.end())
+                return "UNTERMINATED";
+
+            return
+                std::string(
+                    path.begin(),
+                    end);
+        }
+
+        bool AdmitSelectorObservation(
+            WmoFamily family,
+            std::uint32_t vtxIdx,
+            std::uint32_t pixIdx,
+            std::uint32_t selectedVs,
+            std::uint32_t pairedRawVs,
+            std::uint32_t selectedPs)
+        {
+            for (
+                std::size_t i = 0;
+                i < g_selectorObservationCount;
+                ++i)
+            {
+                const auto& existing =
+                    g_selectorObservations[i];
+
+                if (
+                    existing.family == family &&
+                    existing.vtxIdx == vtxIdx &&
+                    existing.pixIdx == pixIdx &&
+                    existing.selectedVs == selectedVs &&
+                    existing.pairedRawVs == pairedRawVs &&
+                    existing.selectedPs == selectedPs)
+                {
+                    return false;
+                }
+            }
+
+            if (
+                g_selectorObservationCount >=
+                    g_selectorObservations.size())
+            {
+                if (!g_selectorLimitLogged)
+                {
+                    g_selectorLimitLogged = true;
+
+                    WLOG_WARN(
+                        "r8-step11-selector: unique observation "
+                        "limit reached; proof logging capped");
+                }
+
+                return false;
+            }
+
+            g_selectorObservations[
+                g_selectorObservationCount++] =
+                SelectorObservation{
+                    family,
+                    vtxIdx,
+                    pixIdx,
+                    selectedVs,
+                    pairedRawVs,
+                    selectedPs};
+
+            return true;
+        }
+
+        void LogWmoSelectorProof(
+            WmoFamily family,
+            std::uint32_t vtxIdx,
+            std::uint32_t pixIdx)
+        {
+            std::uint32_t active = 0;
+
+            if (
+                !ReadClientValue(
+                    sh::kActiveCollection,
+                    active) ||
+                !active)
+            {
+                return;
+            }
+
+            const std::uint32_t pairedRawVtxIdx =
+                vtxIdx & ~1u;
+
+            const WrapperSnapshot selectedVs =
+                SnapshotCollectionWrapper(
+                    active,
+                    sh::kCollectionVtxSlots,
+                    vtxIdx,
+                    90);
+
+            const WrapperSnapshot pairedRawVs =
+                SnapshotCollectionWrapper(
+                    active,
+                    sh::kCollectionVtxSlots,
+                    pairedRawVtxIdx,
+                    90);
+
+            const WrapperSnapshot selectedPs =
+                SnapshotCollectionWrapper(
+                    active,
+                    sh::kCollectionPixSlots,
+                    pixIdx,
+                    16);
+
+            if (
+                !AdmitSelectorObservation(
+                    family,
+                    vtxIdx,
+                    pixIdx,
+                    selectedVs.pointer,
+                    pairedRawVs.pointer,
+                    selectedPs.pointer))
+            {
+                return;
+            }
+
+            const std::string selectedVsHash =
+                SnapshotHash(selectedVs);
+
+            const std::string pairedRawVsHash =
+                SnapshotHash(pairedRawVs);
+
+            const std::string selectedPsHash =
+                SnapshotHash(selectedPs);
+
+            const std::string path =
+                CurrentWmoPath();
+
+            WLOG_INFO(
+                "r8-step11-selector: "
+                "family=%s "
+                "path=\"%s\" "
+                "vtx=%u pix=%u "
+                "light_bit=%u "
+                "paired_raw_vtx=%u "
+                "selected_vs=0x%08X "
+                "selected_vs_len=%u "
+                "selected_vs_ver=0x%08X "
+                "selected_vs_sha=%s "
+                "paired_vs=0x%08X "
+                "paired_vs_len=%u "
+                "paired_vs_ver=0x%08X "
+                "paired_vs_sha=%s "
+                "selected_ps=0x%08X "
+                "selected_ps_len=%u "
+                "selected_ps_ver=0x%08X "
+                "selected_ps_sha=%s "
+                "mutation=0",
+                WmoFamilyName(family),
+                path.c_str(),
+                static_cast<unsigned>(vtxIdx),
+                static_cast<unsigned>(pixIdx),
+                static_cast<unsigned>(vtxIdx & 1u),
+                static_cast<unsigned>(pairedRawVtxIdx),
+                static_cast<unsigned>(selectedVs.pointer),
+                static_cast<unsigned>(selectedVs.byteLength),
+                static_cast<unsigned>(selectedVs.version),
+                selectedVsHash.c_str(),
+                static_cast<unsigned>(pairedRawVs.pointer),
+                static_cast<unsigned>(pairedRawVs.byteLength),
+                static_cast<unsigned>(pairedRawVs.version),
+                pairedRawVsHash.c_str(),
+                static_cast<unsigned>(selectedPs.pointer),
+                static_cast<unsigned>(selectedPs.byteLength),
+                static_cast<unsigned>(selectedPs.version),
+                selectedPsHash.c_str());
         }
 
         void LogFirstWmoCandidate(WmoFamily family)
@@ -287,20 +643,39 @@ namespace wxl::r8::materials
             if (!IsInitialWmoCandidate(family))
                 return;
 
-            // 11B-01 is intentionally a dry-run ownership proof.
+            if (g_config.wmoSelectorProof)
+            {
+                LogWmoSelectorProof(
+                    family,
+                    vtxIdx,
+                    pixIdx);
+            }
+
+            // The original 11B-01 witness remains useful and unchanged.
             LogFirstWmoCandidate(
                 family);
         }
 
         struct WmoRenderScope
         {
-            WmoRenderScope()
+            std::uintptr_t previousRoot = 0;
+
+            explicit WmoRenderScope(
+                void* root)
+                : previousRoot(g_wmoRoot)
             {
                 ++g_wmoRenderDepth;
+
+                g_wmoRoot =
+                    reinterpret_cast<std::uintptr_t>(
+                        root);
             }
 
             ~WmoRenderScope()
             {
+                g_wmoRoot =
+                    previousRoot;
+
                 --g_wmoRenderDepth;
             }
         };
@@ -311,7 +686,7 @@ namespace wxl::r8::materials
             void* group,
             int flag)
         {
-            WmoRenderScope scope;
+            WmoRenderScope scope(root);
 
             g_origWmoExtRender(
                 root,
@@ -326,7 +701,7 @@ namespace wxl::r8::materials
             void* group,
             int flag)
         {
-            WmoRenderScope scope;
+            WmoRenderScope scope(root);
 
             g_origWmoIntRender(
                 root,
@@ -433,11 +808,12 @@ namespace wxl::r8::materials
             }
 
             WLOG_INFO(
-                "r8-step11-material: 11B-01 dry-run substrate enabled "
-                "master=1 wmo=%u m2=%u mutation=0 "
-                "gx-device-draw-owner=0",
+                "r8-step11-material: structural substrate enabled "
+                "master=1 wmo=%u m2=%u selector_proof=%u "
+                "mutation=0 gx-device-draw-owner=0",
                 g_config.wmo ? 1u : 0u,
-                g_config.m2 ? 1u : 0u);
+                g_config.m2 ? 1u : 0u,
+                g_config.wmoSelectorProof ? 1u : 0u);
 
             return true;
         }
