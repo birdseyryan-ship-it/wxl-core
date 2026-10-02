@@ -1,0 +1,159 @@
+name: R8 Step10 Exact Wrath SM3 Disassembly
+
+on:
+  push:
+    branches:
+      - 'r8-step10-wrath-sm3-analysis-*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  disassemble_wrath_sm3:
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout exact analysis commit
+        uses: actions/checkout@v4
+
+      - name: Verify compact Wrath SM3 payload SHA256
+        shell: pwsh
+        run: |
+          $sidecar = `
+            "tools/r8-step10-analysis/wrath-sm3-payload.tar.gz.sha256"
+
+          $payload = `
+            "tools/r8-step10-analysis/wrath-sm3-payload.tar.gz"
+
+          $expected = (
+            Get-Content $sidecar
+          ).Split()[0].ToLower()
+
+          $actual = (
+            Get-FileHash `
+              $payload `
+              -Algorithm SHA256
+          ).Hash.ToLower()
+
+          Write-Host "expected=$expected"
+          Write-Host "actual=$actual"
+
+          if ($actual -ne $expected) {
+            throw "Wrath SM3 payload SHA256 mismatch"
+          }
+
+      - name: Extract unique legacy SM3 payload
+        shell: pwsh
+        run: |
+          New-Item `
+            -ItemType Directory `
+            -Force `
+            wrath-stage |
+            Out-Null
+
+          tar -xzf `
+            tools/r8-step10-analysis/wrath-sm3-payload.tar.gz `
+            -C wrath-stage
+
+          $count = (
+            Get-ChildItem `
+              wrath-stage/unique_dxbc `
+              -Filter *.dxbc `
+              -File
+          ).Count
+
+          Write-Host "unique_sm3_files=$count"
+
+          if ($count -ne 1067) {
+            throw "Expected exactly 1067 unique SM3 programs"
+          }
+
+          Get-Content wrath-stage/PREP_SUMMARY.txt
+
+      - name: Compile exact CP08 disassembler and Wrath validator
+        shell: pwsh
+        run: |
+          python -m py_compile `
+            tools/r6-water-acquire/disassemble_dxbc.py `
+            tools/r8-step10-analysis/validate_wrath_sm3_disassembly.py
+
+      - name: Disassemble all 1067 legacy SM3 programs with D3DCompiler 47
+        shell: pwsh
+        run: |
+          python `
+            tools/r6-water-acquire/disassemble_dxbc.py `
+            wrath-stage/unique_dxbc
+
+      - name: Verify complete assembly file count
+        shell: pwsh
+        run: |
+          $count = (
+            Get-ChildItem `
+              wrath-stage/unique_dxbc `
+              -Filter *.asm `
+              -File
+          ).Count
+
+          Write-Host "assembly_files=$count"
+
+          if ($count -ne 1067) {
+            throw "Expected exactly 1067 assembly files"
+          }
+
+      - name: Validate provenance and shader stages
+        shell: pwsh
+        run: |
+          python `
+            tools/r8-step10-analysis/validate_wrath_sm3_disassembly.py `
+            wrath-stage
+
+          Get-Content `
+            wrath-stage/WRATH_DISASSEMBLY_GATE.txt
+
+      - name: Package exact Wrath disassembly evidence
+        shell: pwsh
+        run: |
+          tar -czf `
+            r8-step10-wrath-sm3-disassembly.tar.gz `
+            -C wrath-stage `
+            unique_dxbc `
+            WRATH_SM3_SLOT_MANIFEST.tsv `
+            WRATH_SM3_UNIQUE.tsv `
+            ZERO_LENGTH_EFFECTIVE_PATHS.txt `
+            PREP_SUMMARY.txt `
+            B06B1_RAW_BLS_SHA256SUMS.txt `
+            B06B1_EXTRACTION_RESULTS.tsv `
+            B06B1_WRATH_SM3_TARGETS.tsv `
+            DISASSEMBLY_MANIFEST.json `
+            DISASSEMBLY_SUMMARY.txt `
+            WRATH_DISASSEMBLY_GATE.txt `
+            ASM_DEDUPE.tsv
+
+          $hash = (
+            Get-FileHash `
+              r8-step10-wrath-sm3-disassembly.tar.gz `
+              -Algorithm SHA256
+          ).Hash.ToLower()
+
+          "$hash  r8-step10-wrath-sm3-disassembly.tar.gz" |
+            Set-Content `
+              r8-step10-wrath-sm3-disassembly.tar.gz.sha256 `
+              -Encoding ascii
+
+          Get-Item `
+            r8-step10-wrath-sm3-disassembly.tar.gz |
+            Format-List Name,Length
+
+      - name: Upload exact Wrath SM3 disassembly evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: r8-step10-wrath-sm3-disassembly-${{ github.sha }}
+          path: |
+            r8-step10-wrath-sm3-disassembly.tar.gz
+            r8-step10-wrath-sm3-disassembly.tar.gz.sha256
+            wrath-stage/WRATH_DISASSEMBLY_GATE.txt
+            wrath-stage/DISASSEMBLY_SUMMARY.txt
+          if-no-files-found: error
+          retention-days: 14
