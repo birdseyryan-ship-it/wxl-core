@@ -7,7 +7,9 @@
 #include "engine/hook/Registry.hpp"
 #include "offsets/engine/Gx.hpp"
 #include "offsets/engine/Camera.hpp"
+#include "offsets/engine/Shader.hpp"
 #include "offsets/game/M2.hpp"
+#include "offsets/game/WMO.hpp"
 #include "offsets/game/WorldScene.hpp"
 #include "game/M2.hpp"
 #include "water/WaterDiagCore.hpp"
@@ -20,15 +22,19 @@
 #include <vector>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <type_traits>
 
 namespace wxl::outlinediag {
 namespace {
 namespace m2=wxl::offsets::game::m2;
+namespace wmo=wxl::offsets::game::wmo;
 namespace gx=wxl::offsets::engine::gx;
+namespace sh=wxl::offsets::engine::shader;
 namespace ws=wxl::offsets::game::worldscene;
 namespace cam=wxl::offsets::engine::camera;
 namespace ev=wxl::events;
+namespace fmt=wxl::structure::m2;
 using wxl::waterdiag::Quote;
 using wxl::waterdiag::Hex;
 using wxl::waterdiag::Sha256;
@@ -39,15 +45,28 @@ std::ofstream sink;
 uint64_t frame=0,sequence=0;
 unsigned sceneDepth=0,windows=0,errors=0;
 size_t bytes=0;
-std::array<unsigned,4> counts{}; // material, draw, readiness, batch compatibility
-std::array<unsigned,4> windowCounts{};
+std::array<unsigned,6> counts{}; // M2 material/draw/readiness/batch, WMO material/draw
+std::array<unsigned,6> windowCounts{};
 DWORD renderThread=0;
 bool ready=false;
-thread_local uint64_t pendingMaterial=0;
+
+thread_local uint64_t pendingM2Material=0;
+thread_local uint64_t pendingWmoMaterial=0;
+thread_local uintptr_t pendingWmoBatch=0;
+thread_local uintptr_t currentWmoRoot=0;
+thread_local uintptr_t currentWmoGroup=0;
+thread_local const char* currentWmoLeaf="NONE";
+thread_local int currentWmoLeafFlag=0;
+
 m2::M2_SetupMaterialFn originalMaterial=nullptr;
 m2::M2_IsDrawableFn originalReady=nullptr;
 m2::M2_IsBatchDoodadCompatibleFn originalBatch=nullptr;
 gx::GxDeviceDrawFn originalDraw=nullptr;
+
+wmo::Wmo_CullBatchFn originalWmoCull=nullptr;
+wmo::Wmo_RenderLeafFn originalWmoExt=nullptr;
+wmo::Wmo_RenderLeafFn originalWmoInt=nullptr;
+sh::EffectBindFn originalWmoEffectBind=nullptr;
 
 struct Json {
     std::string text="{";
@@ -96,6 +115,38 @@ std::string Path(uintptr_t model) {
     auto end=std::find(name.begin(),name.end(),'\0');
     return end==name.end()?std::string{}:std::string(name.begin(),end);
 }
+
+std::string WmoPath(uintptr_t root) {
+    std::array<char,260> name{};
+    if(!ReadBytes(root+wmo::kOffNameInline,name.data(),name.size())) return {};
+    auto end=std::find(name.begin(),name.end(),'\0');
+    return end==name.end()?std::string{}:std::string(name.begin(),end);
+}
+
+const char* WmoFamily(int index) {
+    static constexpr const char* names[7]={
+        "Diffuse","Specular","Metal","Env","Opaque","EnvMetal","Composite"
+    };
+    return index>=0 && index<7 ? names[index] : "UNKNOWN";
+}
+
+struct WmoSelection {
+    int exterior=-1;
+    int alternate=-1;
+};
+
+WmoSelection SelectedWmoEffect(uint32_t active) {
+    WmoSelection out;
+    for(int i=0;i<7;++i) {
+        uint32_t p=0;
+        if(Read<uint32_t>(sh::kExteriorEffectTable,size_t(i)*4,p) && p==active)
+            out.exterior=i;
+        p=0;
+        if(Read<uint32_t>(sh::kAltEffectTable,size_t(i)*4,p) && p==active)
+            out.alternate=i;
+    }
+    return out;
+}
 bool Active(unsigned stage) {
     return ready && sceneDepth && GetCurrentThreadId()==renderThread && config.Samples(frame) &&
            windowCounts[stage]<config.records && bytes<kByteLimit;
@@ -141,7 +192,7 @@ void Bands(Json& j) {
     if(ReadBytes(cam::kViewProj,viewproj,sizeof(viewproj))) j.Raw("engine_viewproj",Floats(viewproj,16));
 }
 void Material(void* ctx,uintptr_t caller) {
-    pendingMaterial=0;
+    pendingM2Material=0;
     if(!Active(0)) return;
     const auto p=reinterpret_cast<uintptr_t>(ctx);
     uint32_t instance=0,element=0,material=0,model=0,skin=0;
@@ -172,16 +223,155 @@ void Material(void* ctx,uintptr_t caller) {
        Read(skin,offsetof(Skin,batches),batches) && batches) {
         wxl::structure::m2::M2Batch b{};
         if(Read(batches,size_t(index)*sizeof(b),b)) {
-            j.Num("skin_shader_id",b.shaderId);j.Num("skin_material_index",b.materialIndex);
-            j.Num("skin_section_index",b.skinSectionIndex);j.Num("skin_texture_count",b.textureCount);
+            j.Num("skin_batch_flags",b.flags);
+            j.Num("skin_priority_plane",b.priorityPlane);
+            j.Num("skin_shader_id",b.shaderId);
+            j.Num("skin_shader_id_highbit_8000",(b.shaderId&0x8000u)?1:0);
+            j.Num("skin_material_index",b.materialIndex);
+            j.Num("skin_section_index",b.skinSectionIndex);
+            j.Num("skin_geoset_index",b.geosetIndex);
+            j.Num("skin_color_index",b.colorIndex);
+            j.Num("skin_material_layer",b.materialLayer);
+            j.Num("skin_texture_count",b.textureCount);
+            j.Num("skin_texture_combo_index",b.textureComboIndex);
+            j.Num("skin_texture_coord_combo_index",b.textureCoordComboIndex);
+            j.Num("skin_texture_weight_combo_index",b.textureWeightComboIndex);
+            j.Num("skin_texture_transform_combo_index",b.textureTransformComboIndex);
         }
     }
-    Bands(j);++counts[0];++windowCounts[0];pendingMaterial=Emit(j);
+
+    uint32_t headerPtr=0;
+    if(model && Read(model,m2::kOffModelHeader,headerPtr) && headerPtr) {
+        uint32_t version=0;
+        uint32_t globalFlags=0;
+
+        uint32_t lookupCount=0;
+        uint32_t lookupRef=0;
+
+        uint32_t comboCount=0;
+        uint32_t comboRef=0;
+
+        const bool haveVersion=
+            Read(
+                headerPtr,
+                offsetof(fmt::M2Header,version),
+                version
+            );
+
+        const bool haveFlags=
+            Read(
+                headerPtr,
+                offsetof(fmt::M2Header,globalFlags),
+                globalFlags
+            );
+
+        const bool haveLookupCount=
+            Read(
+                headerPtr,
+                offsetof(fmt::M2Header,textureUnitLookup)
+                    + offsetof(fmt::M2Array,count),
+                lookupCount
+            );
+
+        const bool haveLookupRef=
+            Read(
+                headerPtr,
+                offsetof(fmt::M2Header,textureUnitLookup)
+                    + offsetof(fmt::M2Array,offset),
+                lookupRef
+            );
+
+        const bool hasCombiner=
+            haveFlags
+            && ((globalFlags&fmt::kFlagUseTextureCombinerCombos)!=0);
+
+        bool haveComboCount=false;
+        bool haveComboRef=false;
+
+        if(hasCombiner) {
+            haveComboCount=
+                Read(
+                    headerPtr,
+                    offsetof(fmt::M2Header,textureCombinerCombos)
+                        + offsetof(fmt::M2Array,count),
+                    comboCount
+                );
+
+            haveComboRef=
+                Read(
+                    headerPtr,
+                    offsetof(fmt::M2Header,textureCombinerCombos)
+                        + offsetof(fmt::M2Array,offset),
+                    comboRef
+                );
+        }
+
+        if(haveVersion)
+            j.Num("model_version",version);
+        else
+            j.Raw("model_version","null");
+
+        if(haveFlags)
+            j.Num("model_global_flags",globalFlags);
+        else
+            j.Raw("model_global_flags","null");
+
+        if(haveLookupCount)
+            j.Num("texture_unit_lookup_count",lookupCount);
+        else
+            j.Raw("texture_unit_lookup_count","null");
+
+        if(haveLookupRef)
+            j.Num("texture_unit_lookup_ref_raw_u32",lookupRef);
+        else
+            j.Raw("texture_unit_lookup_ref_raw_u32","null");
+
+        if(haveFlags)
+            j.Num(
+                "texture_combiner_combo_contract",
+                hasCombiner?1:0
+            );
+        else
+            j.Raw(
+                "texture_combiner_combo_contract",
+                "null"
+            );
+
+        if(!hasCombiner) {
+            j.Num("texture_combiner_combo_count",0);
+            j.Num("texture_combiner_combo_ref_raw_u32",0);
+        } else {
+            if(haveComboCount)
+                j.Num(
+                    "texture_combiner_combo_count",
+                    comboCount
+                );
+            else
+                j.Raw(
+                    "texture_combiner_combo_count",
+                    "null"
+                );
+
+            if(haveComboRef)
+                j.Num(
+                    "texture_combiner_combo_ref_raw_u32",
+                    comboRef
+                );
+            else
+                j.Raw(
+                    "texture_combiner_combo_ref_raw_u32",
+                    "null"
+                );
+        }
+    }
+
+    j.Str("edgefade_family_classification","DEFER_TO_OFFLINE_SHADER_HASH_SELECTOR_PROOF");
+    Bands(j);++counts[0];++windowCounts[0];pendingM2Material=Emit(j);
 }
 void __fastcall HookMaterial(void* ctx,void* edx) {
     auto caller=reinterpret_cast<uintptr_t>(_ReturnAddress());
     originalMaterial(ctx,edx);
-    try { Material(ctx,caller); } catch(...) { pendingMaterial=0;++errors; }
+    try { Material(ctx,caller); } catch(...) { pendingM2Material=0;++errors; }
 }
 template<class Shader> std::string ShaderHash(Shader* s) {
     if(!s) return "null";
@@ -211,44 +401,323 @@ void Hardware(Json& j,IDirect3DDevice9* d) {
         j.Num("viewport_width",vp.Width);j.Num("viewport_height",vp.Height);
         j.Float("viewport_min_z",vp.MinZ);j.Float("viewport_max_z",vp.MaxZ);
     }
+    struct Samp { const char* name; D3DSAMPLERSTATETYPE type; bool asFloat; };
     for(DWORD slot=0;slot<4;++slot) {
         Json t;t.Num("slot",slot);
-        for(auto type:{D3DSAMP_MINFILTER,D3DSAMP_MIPFILTER,D3DSAMP_MIPMAPLODBIAS,D3DSAMP_MAXMIPLEVEL}) {
-            DWORD value=0;if(SUCCEEDED(d->GetSamplerState(slot,type,&value))) {
-                auto key="sampler_"+std::to_string(unsigned(type));t.Num(key.c_str(),value);
+
+        for(auto s:{
+                Samp{"min_filter",D3DSAMP_MINFILTER,false},
+                Samp{"mag_filter",D3DSAMP_MAGFILTER,false},
+                Samp{"mip_filter",D3DSAMP_MIPFILTER,false},
+                Samp{"mip_lod_bias",D3DSAMP_MIPMAPLODBIAS,true},
+                Samp{"max_mip_level",D3DSAMP_MAXMIPLEVEL,false},
+                Samp{"max_anisotropy",D3DSAMP_MAXANISOTROPY,false},
+                Samp{"address_u",D3DSAMP_ADDRESSU,false},
+                Samp{"address_v",D3DSAMP_ADDRESSV,false}
+            }) {
+            DWORD value=0;
+            if(SUCCEEDED(d->GetSamplerState(slot,s.type,&value))) {
+                if(s.asFloat) {
+                    float f=0.0f;
+                    static_assert(sizeof(f)==sizeof(value));
+                    std::memcpy(&f,&value,sizeof(f));
+                    t.Float(s.name,f);
+                } else {
+                    t.Num(s.name,value);
+                }
+            } else {
+                t.Raw(s.name,"null");
             }
         }
+
         Com<IDirect3DBaseTexture9> tex;
         if(SUCCEEDED(d->GetTexture(slot,&tex.p)) && tex.p) {
-            t.Num("levels",tex.p->GetLevelCount());t.Num("resource_min_LOD",tex.p->GetLOD());
+            t.Str("texture_object",Pointer(reinterpret_cast<uintptr_t>(tex.p)));
+            t.Num("levels",tex.p->GetLevelCount());
+            t.Num("resource_min_LOD",tex.p->GetLOD());
             if(tex.p->GetType()==D3DRTYPE_TEXTURE) {
                 D3DSURFACE_DESC desc{};
                 if(SUCCEEDED(static_cast<IDirect3DTexture9*>(tex.p)->GetLevelDesc(0,&desc))) {
-                    t.Num("width",desc.Width);t.Num("height",desc.Height);t.Num("format",unsigned(desc.Format));
+                    t.Num("width",desc.Width);
+                    t.Num("height",desc.Height);
+                    t.Num("format",unsigned(desc.Format));
                 }
             }
         }
-        t.Str("actual_sampled_mip","UNKNOWN");auto key="texture_"+std::to_string(slot);j.Raw(key.c_str(),t.End());
+
+        t.Str("actual_sampled_mip","UNKNOWN");
+        auto key="texture_"+std::to_string(slot);
+        j.Raw(key.c_str(),t.End());
     }
 }
+
+void ObserveWmoBind(uintptr_t batch,uint32_t vtxIdx,uint32_t pixIdx) {
+    Json j;
+    j.Str("event","wmo_material_after_native_effect_bind");
+    j.Str("correlation","ordering_only_not_proven_object_binding");
+    j.Str("source_shader_id_pre_remap","UNAVAILABLE_at_runtime_render_seam");
+    j.Str("root",Pointer(currentWmoRoot));
+    j.Str("group",Pointer(currentWmoGroup));
+    j.Str("moba",Pointer(batch));
+    j.Str("path",WmoPath(currentWmoRoot));
+    j.Str("wmo_leaf",currentWmoLeaf);
+    j.Num("wmo_leaf_flag",currentWmoLeafFlag);
+    j.Num("effect_vtx_index",vtxIdx);
+    j.Num("effect_pix_index",pixIdx);
+
+    uint8_t mobaFlags=0;
+    if(Read(batch,wmo::kOffMobaFlags,mobaFlags))
+        j.Num("moba_flags",mobaFlags);
+    else
+        j.Raw("moba_flags","null");
+
+    Field<uint32_t>(j,"moba_start_index",batch,wmo::kOffMobaStartIndex);
+    Field<uint16_t>(j,"moba_index_count",batch,wmo::kOffMobaCount);
+    Field<uint16_t>(j,"moba_min_index",batch,wmo::kOffMobaMinIndex);
+    Field<uint16_t>(j,"moba_max_index",batch,wmo::kOffMobaMaxIndex);
+
+    const bool modernIndex=(mobaFlags&wmo::kMobaFlagMaterialModern)!=0;
+    j.Str("moba_material_index_encoding",modernIndex?"modern_u16_at_0x0A":"stock_u8_at_0x17");
+
+    uint32_t materialIndex=0;
+    bool haveMaterialIndex=false;
+    if(modernIndex) {
+        uint16_t value=0;
+        if(Read(batch,wmo::kOffMobaMaterialModern,value)) {
+            materialIndex=value;
+            haveMaterialIndex=true;
+        }
+    } else {
+        uint8_t value=0;
+        if(Read(batch,wmo::kOffMobaMaterial,value)) {
+            materialIndex=value;
+            haveMaterialIndex=true;
+        }
+    }
+
+    if(haveMaterialIndex)
+        j.Num("runtime_material_index",materialIndex);
+    else
+        j.Raw("runtime_material_index","null");
+
+    uint32_t groupFlags=0;
+    if(Read(currentWmoGroup,wmo::kOffGroupFormatFlags,groupFlags)) {
+        j.Num("group_format_flags",groupFlags);
+        j.Num("group_has_two_uv",(groupFlags&wmo::kGroupFlagTwoUv)?1:0);
+    } else {
+        j.Raw("group_format_flags","null");
+        j.Raw("group_has_two_uv","null");
+    }
+
+    uint32_t materialBase=0,materialCount=0;
+    const bool haveBase=Read(currentWmoRoot,wmo::kOffMaterialBase,materialBase) && materialBase;
+    const bool haveCount=Read(currentWmoRoot,wmo::kOffMaterialCount,materialCount);
+
+    if(haveCount)
+        j.Num("root_material_count",materialCount);
+    else
+        j.Raw("root_material_count","null");
+
+    if(haveBase && haveCount && haveMaterialIndex && materialIndex<materialCount) {
+        const uintptr_t material=uintptr_t(materialBase)+size_t(materialIndex)*wmo::kMomtStride;
+        j.Str("runtime_momt",Pointer(material));
+
+        uint32_t flags=0,shaderId=0,blend=0,tex1=0,tex2=0,diffuse=0,h1=0,h2=0;
+
+        if(Read(material,wmo::kOffMomtFlags,flags)) j.Num("momt_flags",flags);
+        else j.Raw("momt_flags","null");
+
+        if(Read(material,wmo::kOffMomtShader,shaderId)) j.Num("momt_shader_runtime_id",shaderId);
+        else j.Raw("momt_shader_runtime_id","null");
+
+        if(Read(material,wmo::kOffMomtBlend,blend)) j.Num("momt_blend_mode",blend);
+        else j.Raw("momt_blend_mode","null");
+
+        if(Read(material,wmo::kOffMomtTexture1,tex1)) j.Num("momt_texture1_ref",tex1);
+        else j.Raw("momt_texture1_ref","null");
+
+        if(Read(material,wmo::kOffMomtTexture2,tex2)) j.Num("momt_texture2_ref",tex2);
+        else j.Raw("momt_texture2_ref","null");
+
+        if(Read(material,wmo::kOffMomtDiffColor,diffuse)) j.Num("momt_diffuse_bgra",diffuse);
+        else j.Raw("momt_diffuse_bgra","null");
+
+        if(Read(material,wmo::kOffMomtHandle1,h1)) j.Str("momt_texture1_handle",Pointer(h1));
+        else j.Raw("momt_texture1_handle","null");
+
+        if(Read(material,wmo::kOffMomtHandle2,h2)) j.Str("momt_texture2_handle",Pointer(h2));
+        else j.Raw("momt_texture2_handle","null");
+    } else {
+        j.Raw("runtime_momt","null");
+    }
+
+    uint32_t active=0;
+    if(ReadBytes(sh::kActiveCollection,&active,sizeof(active)) && active) {
+        j.Str("active_effect_collection",Pointer(active));
+        const auto selected=SelectedWmoEffect(active);
+
+        j.Num("selected_effect_exterior_index",selected.exterior);
+        j.Num("selected_effect_alternate_index",selected.alternate);
+
+        const int familyIndex=selected.exterior>=0 ? selected.exterior : selected.alternate;
+        j.Str("selected_effect_family",WmoFamily(familyIndex));
+
+        if(selected.exterior>=0 && selected.alternate>=0)
+            j.Str("selected_effect_table","exterior_and_alternate_same_pointer");
+        else if(selected.exterior>=0)
+            j.Str("selected_effect_table","exterior");
+        else if(selected.alternate>=0)
+            j.Str("selected_effect_table","alternate");
+        else
+            j.Str("selected_effect_table","UNKNOWN");
+    } else {
+        j.Raw("active_effect_collection","null");
+        j.Num("selected_effect_exterior_index",-1);
+        j.Num("selected_effect_alternate_index",-1);
+        j.Str("selected_effect_family","UNKNOWN");
+        j.Str("selected_effect_table","UNKNOWN");
+    }
+
+    ++counts[4];
+    ++windowCounts[4];
+    pendingWmoMaterial=Emit(j);
+}
+
+char __cdecl HookWmoCull(void* mobaRecord) {
+    const char native=originalWmoCull(mobaRecord);
+    pendingWmoBatch=0;
+
+    if(native==0 && mobaRecord && currentWmoRoot && currentWmoGroup && Active(4))
+        pendingWmoBatch=reinterpret_cast<uintptr_t>(mobaRecord);
+
+    return native;
+}
+
+void __cdecl HookWmoEffectBind(uint32_t vtxIdx,uint32_t pixIdx) {
+    const uintptr_t batch=pendingWmoBatch;
+    pendingWmoBatch=0;
+
+    originalWmoEffectBind(vtxIdx,pixIdx);
+
+    pendingWmoMaterial=0;
+    if(!batch || !currentWmoRoot || !currentWmoGroup || !Active(4))
+        return;
+
+    try {
+        ObserveWmoBind(batch,vtxIdx,pixIdx);
+    } catch(...) {
+        pendingWmoMaterial=0;
+        ++errors;
+    }
+}
+
+void __fastcall HookWmoExt(void* root,void* edx,void* group,int flag) {
+    const auto prevRoot=currentWmoRoot;
+    const auto prevGroup=currentWmoGroup;
+    const auto prevLeaf=currentWmoLeaf;
+    const auto prevFlag=currentWmoLeafFlag;
+    const auto prevBatch=pendingWmoBatch;
+    const auto prevMaterial=pendingWmoMaterial;
+
+    currentWmoRoot=reinterpret_cast<uintptr_t>(root);
+    currentWmoGroup=reinterpret_cast<uintptr_t>(group);
+    currentWmoLeaf="exterior";
+    currentWmoLeafFlag=flag;
+    pendingWmoBatch=0;
+    pendingWmoMaterial=0;
+
+    originalWmoExt(root,edx,group,flag);
+
+    pendingWmoBatch=prevBatch;
+    pendingWmoMaterial=prevMaterial;
+    currentWmoRoot=prevRoot;
+    currentWmoGroup=prevGroup;
+    currentWmoLeaf=prevLeaf;
+    currentWmoLeafFlag=prevFlag;
+}
+
+void __fastcall HookWmoInt(void* root,void* edx,void* group,int flag) {
+    const auto prevRoot=currentWmoRoot;
+    const auto prevGroup=currentWmoGroup;
+    const auto prevLeaf=currentWmoLeaf;
+    const auto prevFlag=currentWmoLeafFlag;
+    const auto prevBatch=pendingWmoBatch;
+    const auto prevMaterial=pendingWmoMaterial;
+
+    currentWmoRoot=reinterpret_cast<uintptr_t>(root);
+    currentWmoGroup=reinterpret_cast<uintptr_t>(group);
+    currentWmoLeaf="interior_or_segmented";
+    currentWmoLeafFlag=flag;
+    pendingWmoBatch=0;
+    pendingWmoMaterial=0;
+
+    originalWmoInt(root,edx,group,flag);
+
+    pendingWmoBatch=prevBatch;
+    pendingWmoMaterial=prevMaterial;
+    currentWmoRoot=prevRoot;
+    currentWmoGroup=prevGroup;
+    currentWmoLeaf=prevLeaf;
+    currentWmoLeafFlag=prevFlag;
+}
+
 void __fastcall HookDraw(void* device,void* edx,uint32_t* batch,int indexed) {
     auto caller=reinterpret_cast<uintptr_t>(_ReturnAddress());
-    // Consume only the first Gx draw after this material setter. This is an
-    // ORDERING CORRELATION, not a statically proven one-to-one object/draw bind.
-    uint64_t token=pendingMaterial;pendingMaterial=0;
+
+    // Both tokens are ordering correlations only. Never promote either to
+    // one-to-one draw ownership without separate proof.
+    const uint64_t m2Token=pendingM2Material;
+    const uint64_t wmoToken=pendingWmoMaterial;
+    pendingM2Material=0;
+    pendingWmoMaterial=0;
+
     originalDraw(device,edx,batch,indexed);
-    if(!token || !Active(1)) return;
-    try {
-        Json j;j.Str("event","first_Gx_draw_after_material");j.Num("material_sequence",token);
-        j.Str("correlation","ordering_only_not_proven_object_binding");j.Str("native_draw_caller",Pointer(caller));
-        j.Str("route","UNKNOWN_use_native_caller_and_run_record");j.Num("indexed",indexed);
-        Field<uint32_t>(j,"primitive_type",reinterpret_cast<uintptr_t>(batch),gx::kGxBatchPrimType);
-        Field<uint32_t>(j,"start_index",reinterpret_cast<uintptr_t>(batch),gx::kGxBatchStartIndex);
-        Field<uint32_t>(j,"index_count",reinterpret_cast<uintptr_t>(batch),gx::kGxBatchIndexCount);
-        uint32_t raw=0;
-        if(Read(reinterpret_cast<uintptr_t>(device),gx::kD3DDeviceField,raw) && raw) Hardware(j,reinterpret_cast<IDirect3DDevice9*>(raw));
-        ++counts[1];++windowCounts[1];Emit(j);
-    } catch(...) { ++errors; }
+
+    if(m2Token && Active(1)) {
+        try {
+            Json j;
+            j.Str("event","first_Gx_draw_after_material");
+            j.Num("material_sequence",m2Token);
+            j.Str("correlation","ordering_only_not_proven_object_binding");
+            j.Str("native_draw_caller",Pointer(caller));
+            j.Str("route","UNKNOWN_use_native_caller_and_run_record");
+            j.Num("indexed",indexed);
+            Field<uint32_t>(j,"primitive_type",reinterpret_cast<uintptr_t>(batch),gx::kGxBatchPrimType);
+            Field<uint32_t>(j,"start_index",reinterpret_cast<uintptr_t>(batch),gx::kGxBatchStartIndex);
+            Field<uint32_t>(j,"index_count",reinterpret_cast<uintptr_t>(batch),gx::kGxBatchIndexCount);
+            uint32_t raw=0;
+            if(Read(reinterpret_cast<uintptr_t>(device),gx::kD3DDeviceField,raw) && raw)
+                Hardware(j,reinterpret_cast<IDirect3DDevice9*>(raw));
+            ++counts[1];
+            ++windowCounts[1];
+            Emit(j);
+        } catch(...) {
+            ++errors;
+        }
+    }
+
+    if(wmoToken && Active(5)) {
+        try {
+            Json j;
+            j.Str("event","first_Gx_draw_after_wmo_effect_bind");
+            j.Num("wmo_material_sequence",wmoToken);
+            j.Str("correlation","ordering_only_not_proven_object_binding");
+            j.Str("native_draw_caller",Pointer(caller));
+            j.Str("route","WMO_ordering_correlation");
+            j.Num("indexed",indexed);
+            Field<uint32_t>(j,"primitive_type",reinterpret_cast<uintptr_t>(batch),gx::kGxBatchPrimType);
+            Field<uint32_t>(j,"start_index",reinterpret_cast<uintptr_t>(batch),gx::kGxBatchStartIndex);
+            Field<uint32_t>(j,"index_count",reinterpret_cast<uintptr_t>(batch),gx::kGxBatchIndexCount);
+            uint32_t raw=0;
+            if(Read(reinterpret_cast<uintptr_t>(device),gx::kD3DDeviceField,raw) && raw)
+                Hardware(j,reinterpret_cast<IDirect3DDevice9*>(raw));
+            ++counts[5];
+            ++windowCounts[5];
+            Emit(j);
+        } catch(...) {
+            ++errors;
+        }
+    }
 }
 int __fastcall HookReady(void* instance,void* edx,int a,int b) {
     auto caller=reinterpret_cast<uintptr_t>(_ReturnAddress());
@@ -271,7 +740,14 @@ int __fastcall HookBatch(void* instance,void* edx,uint8_t* flags) {
 }
 void Begin(void*,const void*) {
     if(!ready) return;
-    if(!sceneDepth) { renderThread=GetCurrentThreadId();++frame;pendingMaterial=0;windowCounts={}; }
+    if(!sceneDepth) {
+        renderThread=GetCurrentThreadId();
+        ++frame;
+        pendingM2Material=0;
+        pendingWmoMaterial=0;
+        pendingWmoBatch=0;
+        windowCounts={};
+    }
     ++sceneDepth;
     if(config.Samples(frame) && sceneDepth==1) {
         try {Json j;j.Str("event","sample_begin");Bands(j);Emit(j);++windows;}catch(...){++errors;}
@@ -281,11 +757,24 @@ void End(void*,const void*) {
     if(!sceneDepth) return;
     --sceneDepth;
     if(sceneDepth) return;
-    pendingMaterial=0;
+    pendingM2Material=0;
+    pendingWmoMaterial=0;
+    pendingWmoBatch=0;
     if(config.Samples(frame)) {
-        try {Json j;j.Str("event","sample_end");j.Num("windows",windows);j.Num("capture_exceptions",errors);
-            for(unsigned i=0;i<4;++i) {auto key="records_"+std::to_string(i);j.Num(key.c_str(),counts[i]);}
-            Emit(j);sink.flush();}catch(...){++errors;}
+        try {
+            Json j;
+            j.Str("event","sample_end");
+            j.Num("windows",windows);
+            j.Num("capture_exceptions",errors);
+            for(unsigned i=0;i<6;++i) {
+                auto key="records_"+std::to_string(i);
+                j.Num(key.c_str(),counts[i]);
+            }
+            Emit(j);
+            sink.flush();
+        } catch(...) {
+            ++errors;
+        }
     }
 }
 bool Identity() {
@@ -310,12 +799,23 @@ bool Install() {
         ok &= wxl::hook::Install("R7OutlineDraw",gx::kGxDeviceDraw,&HookDraw,&originalDraw,-1000);
         ok &= wxl::hook::Install("R7OutlineReadiness",m2::kIsDrawable,&HookReady,&originalReady,-1000);
         ok &= wxl::hook::Install("R7OutlineBatch",m2::kIsBatchDoodadCompatible,&HookBatch,&originalBatch,-1000);
+
+        // Step 10C adds READ-ONLY WMO observation around the native batch chain.
+        // Priority -1000 means each observer calls through any normal-priority
+        // renderer hook first and inspects the resulting state/result afterwards.
+        ok &= wxl::hook::Install("R8MaterialWmoCull",wmo::kCullBatch,&HookWmoCull,&originalWmoCull,-1000);
+        ok &= wxl::hook::Install("R8MaterialWmoExt",wmo::kExtRender,&HookWmoExt,&originalWmoExt,-1000);
+        ok &= wxl::hook::Install("R8MaterialWmoInt",wmo::kIntRender,&HookWmoInt,&originalWmoInt,-1000);
+        ok &= wxl::hook::Install("R8MaterialWmoEffectBind",sh::kEffectBind,&HookWmoEffectBind,&originalWmoEffectBind,-1000);
+
         if(!ok) return false;
         ev::Subscribe(ev::Event::OnWorldSceneBegin,&Begin,nullptr);
         ev::Subscribe(ev::Event::OnWorldSceneEnd,&End,nullptr);
         ready=true;
         Json j;j.Str("event","identity");j.Str("wow_sha256",kExeSha);j.Str("mode","read_only");
         j.Str("object_draw_binding","ordering_correlation_requires_validation");
+        j.Str("wmo_draw_binding","ordering_correlation_requires_validation");
+        j.Str("step10c_material_observer","enabled");
         j.Num("start",config.start);j.Num("stride",config.stride);j.Num("windows",config.windows);Emit(j);sink.flush();
         WLOG_INFO("r7-outline: read-only capture %s start=%u stride=%u windows=%u",file.c_str(),config.start,config.stride,config.windows);
         return true;

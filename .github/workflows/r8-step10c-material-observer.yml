@@ -1,0 +1,101 @@
+name: R8 Step10C Material Observer Qualification
+
+on:
+  push:
+    branches:
+      - 'r8-step10c-material-observer-*'
+    paths:
+      - 'src/client/CWorldScene/*Outline*'
+      - 'tools/r7-outline-check/**'
+      - '.github/workflows/r8-step10c-material-observer.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build Win32 WarcraftXL only
+        run: |
+          cmake -S . -B build-r8-10c -A Win32
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          cmake --build build-r8-10c --config Release --target WarcraftXL --parallel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Qualify read-only material observer
+        run: |
+          cmake -S tools/r7-outline-check -B build-r8-10ccheck -A Win32
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          cmake --build build-r8-10ccheck --config Release --parallel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          ./build-r8-10ccheck/Release/R7OutlineCheck.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          python -m unittest discover -s tools/r7-outline-check -p 'test_*.py' -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Qualify frozen R5 receiver assembly
+        run: |
+          cmake -S tools/r5-receiver-check -B build-r5check -A Win32
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          cmake --build build-r5check --config Release --parallel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          ./build-r5check/Release/R5ReceiverSmoke.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Stage exact diagnostic candidate
+        run: |
+          New-Item -ItemType Directory -Force dist-r8-10c | Out-Null
+
+          Copy-Item build-r8-10c/Release/WarcraftXL.dll dist-r8-10c/WarcraftXL.dll
+          Copy-Item experiments/r7-outline/LAUNCH_OPTIONS.txt dist-r8-10c/LAUNCH_OPTIONS.txt
+          Copy-Item experiments/r7-outline/NORMAL_LAUNCH_OPTIONS.txt dist-r8-10c/NORMAL_LAUNCH_OPTIONS.txt
+          Copy-Item experiments/r7-outline/manage_candidate.py dist-r8-10c/manage_candidate.py
+          Copy-Item tools/r7-outline-check/audit_outline.py dist-r8-10c/audit_outline.py
+
+          $sha = (git rev-parse HEAD).Trim()
+          $parent = (git rev-parse HEAD^).Trim()
+
+          @{
+            commit = $sha
+            parent = $parent
+            required_base = "40080a2555481d104ee5c97935f4ee3cc7e43e5d"
+            artifact = "WarcraftXL.dll only"
+            mode = "read_only"
+            live_qualified = $false
+            wmo_draw_binding = "ordering correlation only"
+            m2_draw_binding = "ordering correlation only"
+            edgefade_cause = "UNPROVEN"
+          } | ConvertTo-Json | Set-Content dist-r8-10c/SOURCE_AUTHORITY.json
+
+          Get-ChildItem dist-r8-10c -File |
+            Where-Object Name -ne SHA256SUMS.txt |
+            ForEach-Object {
+              $h=(Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+              "$h  $($_.Name)" | Add-Content dist-r8-10c/SHA256SUMS.txt
+            }
+
+          Get-Content dist-r8-10c/SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: r8-step10c-material-observer-${{ github.sha }}
+          path: dist-r8-10c/
+          if-no-files-found: error
+          retention-days: 30
