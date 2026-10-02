@@ -68,8 +68,8 @@ jobs:
             "dist-step11\WarcraftXL.dll"
 
           if (
-            Test-Path "dist-step11\Wow.exe" -or
-            Test-Path "dist-step11\d3d9.dll"
+            (Test-Path "dist-step11\Wow.exe") -or
+            (Test-Path "dist-step11\d3d9.dll")
           ) {
             throw "Protected binary entered Step11 package"
           }
