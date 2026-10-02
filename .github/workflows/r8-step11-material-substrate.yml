@@ -1,0 +1,123 @@
+name: R8 Step11 Structural Material Substrate
+
+on:
+  push:
+    branches:
+      - 'r8-step11-integration-*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  qualify-step11b01:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout exact candidate commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Show exact source authority
+        run: |
+          Write-Host "Commit: $env:GITHUB_SHA"
+          git status --short --branch
+          git log -1 --format="Commit: %H%nParent: %P%nTree: %T%nSubject: %s"
+
+      - name: Run structural-material source tests
+        run: |
+          python -m unittest discover `
+            -s tools/r8-step11-material-check `
+            -p "test_structural_material_source.py" `
+            -v
+
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Configure Win32
+        run: |
+          cmake -S . -B build-step11 -A Win32
+
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Build WarcraftXL only
+        run: |
+          cmake --build build-step11 `
+            --config Release `
+            --target WarcraftXL `
+            --parallel
+
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Verify package contains no protected binaries
+        run: |
+          New-Item -ItemType Directory -Force -Path dist-step11 | Out-Null
+
+          Copy-Item `
+            "build-step11\Release\WarcraftXL.dll" `
+            "dist-step11\WarcraftXL.dll"
+
+          if (
+            Test-Path "dist-step11\Wow.exe" -or
+            Test-Path "dist-step11\d3d9.dll"
+          ) {
+            throw "Protected binary entered Step11 package"
+          }
+
+      - name: Record source and binary authority
+        run: |
+          $dllHash = (
+            Get-FileHash `
+              -Algorithm SHA256 `
+              "dist-step11\WarcraftXL.dll"
+          ).Hash.ToLower()
+
+          "$dllHash  WarcraftXL.dll" |
+            Set-Content "dist-step11\SHA256SUMS.txt"
+
+          $tree = git show -s --format='%T' HEAD
+          $parent = git show -s --format='%P' HEAD
+
+          $authority = [ordered]@{
+            commit = "$env:GITHUB_SHA"
+            parent = "$parent"
+            tree = "$tree"
+            required_base = "1f03309da4639771d74c8957c85bd9653069b7c4"
+            step = "R8_STEP11B01"
+            mode = "default_off_dry_run_substrate"
+            default_hooks_installed = $false
+            d3d_mutation = $false
+            gx_device_draw_owner = $false
+            m2_seam = "post_native_setup_material"
+            wmo_seam = "scoped_post_native_effect_bind"
+            unknown_routes = "stock_fallback"
+            m2_8002 = "explicitly_deferred"
+          }
+
+          $authority |
+            ConvertTo-Json |
+            Set-Content "dist-step11\SOURCE_AUTHORITY.json"
+
+          Get-Content "dist-step11\SHA256SUMS.txt"
+          Get-Content "dist-step11\SOURCE_AUTHORITY.json"
+
+      - name: Upload Step11B01 candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: r8-step11b01-material-substrate-${{ github.sha }}
+          path: |
+            dist-step11/WarcraftXL.dll
+            dist-step11/SHA256SUMS.txt
+            dist-step11/SOURCE_AUTHORITY.json
+          if-no-files-found: error
+          retention-days: 14
