@@ -75,12 +75,14 @@ jobs:
           @{
             commit = $sha
             parent = $parent
-            required_base = "40080a2555481d104ee5c97935f4ee3cc7e43e5d"
+            required_base = "fa1bef8b2885322e2b314de4037ae5a7c1d24696"
             artifact = "WarcraftXL.dll only"
             mode = "read_only"
             live_qualified = $false
-            wmo_draw_binding = "ordering correlation only"
-            m2_draw_binding = "ordering correlation only"
+            hardware_bridge = "direct post-native M2 batch plus post-native WMO effect-bind snapshots"
+            gx_draw_probe = "raw invocation and pending-token counters"
+            wmo_draw_binding = "post-native effect-bind hardware snapshot; not final draw ownership"
+            m2_draw_binding = "direct native batch-context post-call; not final device ownership"
             edgefade_cause = "UNPROVEN"
           } | ConvertTo-Json | Set-Content dist-r8-10c/SOURCE_AUTHORITY.json
 

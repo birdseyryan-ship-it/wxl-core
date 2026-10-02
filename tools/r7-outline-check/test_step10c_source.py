@@ -2,7 +2,9 @@ import unittest
 from pathlib import Path
 
 
-SOURCE = Path("src/client/CWorldScene/DistantOutlineDiagnostics.cpp")
+SOURCE = Path(
+    "src/client/CWorldScene/DistantOutlineDiagnostics.cpp"
+)
 
 
 class Step10CSourceContract(unittest.TestCase):
@@ -12,18 +14,20 @@ class Step10CSourceContract(unittest.TestCase):
 
     def test_canonical_identity_gate_preserved(self):
         self.assertIn(
-            '57dd8955fd7238b00969f6011cdaa13dca14daa5849d1f9be64152bd4c7fe5da',
+            "57dd8955fd7238b00969f6011cdaa13d"
+            "ca14daa5849d1f9be64152bd4c7fe5da",
             self.text,
         )
-        self.assertIn("canonical Wow.exe SHA/base gate failed", self.text)
+        self.assertIn(
+            "canonical Wow.exe SHA/base gate failed",
+            self.text,
+        )
 
     def test_default_off_control_preserved(self):
         policy = Path(
             "src/client/CWorldScene/OutlineDiagnosticPolicy.hpp"
         ).read_text(encoding="utf-8")
 
-        # The policy owns the explicit environment opt-in and defaults
-        # enabled=false. The implementation consumes the parsed Config.
         self.assertIn("bool enabled=false", policy)
         self.assertIn('get("WXL_R7_OUTLINE_DIAG")', policy)
         self.assertIn('std::strcmp(s,"0")==0', policy)
@@ -56,6 +60,39 @@ class Step10CSourceContract(unittest.TestCase):
         ):
             self.assertIn(token, self.text)
 
+    def test_direct_hardware_bridge_present(self):
+        for token in (
+            "step10c04_direct_hardware_bridge",
+            "R8MaterialM2TriangleBatch",
+            "R8MaterialM2DoodadBatch",
+            "m2_batch_after_native_draw",
+            "after_native_M2_material_setup",
+            "after_native_M2_batch",
+            "after_native_WMO_effect_bind",
+            "raw_gx_device_draw_calls",
+            "raw_gx_device_draw_m2_token_calls",
+            "raw_gx_device_draw_wmo_token_calls",
+            "hardware_observation_phase",
+            "hardware_state",
+        ):
+            self.assertIn(token, self.text)
+
+    def test_current_section_is_not_stale_context_copy(self):
+        self.assertIn(
+            "gx::kM2ElementSectionField",
+            self.text,
+        )
+
+        direct = self.text[
+            self.text.index("void ObserveM2Batch"):
+            self.text.index("void __fastcall HookM2TriangleBatch")
+        ]
+
+        self.assertNotIn(
+            "kDrawBatchCtxSectionField",
+            direct,
+        )
+
     def test_sampler_observation_is_named_and_read_only(self):
         for token in (
             "min_filter",
@@ -81,15 +118,27 @@ class Step10CSourceContract(unittest.TestCase):
 
     def test_correlation_never_promoted(self):
         self.assertGreaterEqual(
-            self.text.count("ordering_only_not_proven_object_binding"), 3
+            self.text.count(
+                "ordering_only_not_proven_object_binding"
+            ),
+            3,
         )
+
+        self.assertIn(
+            "direct_native_M2_batch_context_post_call_"
+            "not_final_device_ownership",
+            self.text,
+        )
+
         self.assertIn(
             "DEFER_TO_OFFLINE_SHADER_HASH_SELECTOR_PROOF",
             self.text,
         )
 
-    def test_wmo_hooks_are_outer_observers(self):
+    def test_observer_hooks_are_outer_read_only_wrappers(self):
         for name in (
+            "R8MaterialM2TriangleBatch",
+            "R8MaterialM2DoodadBatch",
             "R8MaterialWmoCull",
             "R8MaterialWmoExt",
             "R8MaterialWmoInt",
@@ -97,7 +146,10 @@ class Step10CSourceContract(unittest.TestCase):
         ):
             self.assertIn(name, self.text)
 
-        self.assertGreaterEqual(self.text.count("-1000"), 8)
+        self.assertGreaterEqual(
+            self.text.count("-1000"),
+            10,
+        )
 
 
 if __name__ == "__main__":

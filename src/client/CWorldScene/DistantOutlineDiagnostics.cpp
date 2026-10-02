@@ -45,8 +45,11 @@ std::ofstream sink;
 uint64_t frame=0,sequence=0;
 unsigned sceneDepth=0,windows=0,errors=0;
 size_t bytes=0;
-std::array<unsigned,6> counts{}; // M2 material/draw/readiness/batch, WMO material/draw
+std::array<unsigned,6> counts{}; // M2 material/direct-batch/readiness/batch, WMO material/draw
 std::array<unsigned,6> windowCounts{};
+uint64_t rawGxDrawCallsWindow=0;
+uint64_t rawGxDrawM2TokenWindow=0;
+uint64_t rawGxDrawWmoTokenWindow=0;
 DWORD renderThread=0;
 bool ready=false;
 
@@ -62,6 +65,11 @@ m2::M2_SetupMaterialFn originalMaterial=nullptr;
 m2::M2_IsDrawableFn originalReady=nullptr;
 m2::M2_IsBatchDoodadCompatibleFn originalBatch=nullptr;
 gx::GxDeviceDrawFn originalDraw=nullptr;
+
+using M2TriangleBatchFn=void(__fastcall*)(void* ctx,void* edx);
+using M2DoodadBatchFn=void(__fastcall*)(void* ctx,void* edx,void* elements,void* indices);
+M2TriangleBatchFn originalM2TriangleBatch=nullptr;
+M2DoodadBatchFn originalM2DoodadBatch=nullptr;
 
 wmo::Wmo_CullBatchFn originalWmoCull=nullptr;
 wmo::Wmo_RenderLeafFn originalWmoExt=nullptr;
@@ -191,6 +199,9 @@ void Bands(Json& j) {
     if(ReadBytes(cam::kCameraPos,camera,sizeof(camera))) j.Raw("camera",Floats(camera,3));
     if(ReadBytes(cam::kViewProj,viewproj,sizeof(viewproj))) j.Raw("engine_viewproj",Floats(viewproj,16));
 }
+IDirect3DDevice9* LiveD3D();
+void Hardware(Json& j,IDirect3DDevice9* d,const char* phase);
+
 void Material(void* ctx,uintptr_t caller) {
     pendingM2Material=0;
     if(!Active(0)) return;
@@ -366,6 +377,14 @@ void Material(void* ctx,uintptr_t caller) {
     }
 
     j.Str("edgefade_family_classification","DEFER_TO_OFFLINE_SHADER_HASH_SELECTOR_PROOF");
+
+    if(auto* d=LiveD3D()) {
+        Hardware(j,d,"after_native_M2_material_setup");
+    } else {
+        j.Str("hardware_observation_phase","after_native_M2_material_setup");
+        j.Raw("hardware_state","null");
+    }
+
     Bands(j);++counts[0];++windowCounts[0];pendingM2Material=Emit(j);
 }
 void __fastcall HookMaterial(void* ctx,void* edx) {
@@ -381,7 +400,8 @@ template<class Shader> std::string ShaderHash(Shader* s) {
     if(FAILED(s->GetFunction(code.data(),&n)) || n>code.size()) return "UNAVAILABLE";
     return Hex(Sha256::Of(code.data(),n));
 }
-void Hardware(Json& j,IDirect3DDevice9* d) {
+void Hardware(Json& j,IDirect3DDevice9* d,const char* phase) {
+    j.Str("hardware_observation_phase",phase);
     Json rs;
     struct State { const char* name;D3DRENDERSTATETYPE state; };
     for(auto s:{State{"alpha_ref",D3DRS_ALPHAREF},State{"alpha_test",D3DRS_ALPHATESTENABLE},
@@ -392,7 +412,7 @@ void Hardware(Json& j,IDirect3DDevice9* d) {
                 State{"fog",D3DRS_FOGENABLE},State{"color_write",D3DRS_COLORWRITEENABLE}}) {
         DWORD v=0;if(SUCCEEDED(d->GetRenderState(s.state,&v)))rs.Num(s.name,v);else rs.Raw(s.name,"null");
     }
-    j.Raw("hardware_after_native_draw",rs.End());
+    j.Raw("hardware_state",rs.End());
     Com<IDirect3DVertexShader9> vs;Com<IDirect3DPixelShader9> ps;
     if(SUCCEEDED(d->GetVertexShader(&vs.p))) j.Str("vs_sha256",ShaderHash(vs.p));
     if(SUCCEEDED(d->GetPixelShader(&ps.p))) j.Str("ps_sha256",ShaderHash(ps.p));
@@ -449,6 +469,19 @@ void Hardware(Json& j,IDirect3DDevice9* d) {
         auto key="texture_"+std::to_string(slot);
         j.Raw(key.c_str(),t.End());
     }
+}
+
+IDirect3DDevice9* LiveD3D() {
+    uint32_t gxDevice=0;
+    uint32_t d3d=0;
+
+    if(!ReadBytes(gx::kGxDevicePtr,&gxDevice,sizeof(gxDevice)) || !gxDevice)
+        return nullptr;
+
+    if(!Read(uintptr_t(gxDevice),gx::kD3DDeviceField,d3d) || !d3d)
+        return nullptr;
+
+    return reinterpret_cast<IDirect3DDevice9*>(uintptr_t(d3d));
 }
 
 void ObserveWmoBind(uintptr_t batch,uint32_t vtxIdx,uint32_t pixIdx) {
@@ -578,6 +611,13 @@ void ObserveWmoBind(uintptr_t batch,uint32_t vtxIdx,uint32_t pixIdx) {
         j.Str("selected_effect_table","UNKNOWN");
     }
 
+    if(auto* d=LiveD3D()) {
+        Hardware(j,d,"after_native_WMO_effect_bind");
+    } else {
+        j.Str("hardware_observation_phase","after_native_WMO_effect_bind");
+        j.Raw("hardware_state","null");
+    }
+
     ++counts[4];
     ++windowCounts[4];
     pendingWmoMaterial=Emit(j);
@@ -661,8 +701,112 @@ void __fastcall HookWmoInt(void* root,void* edx,void* group,int flag) {
     currentWmoLeafFlag=prevFlag;
 }
 
+
+void ObserveM2Batch(void* ctx,const char* route) {
+    if(!ctx || !Active(1))
+        return;
+
+    const uintptr_t p=reinterpret_cast<uintptr_t>(ctx);
+    uint32_t instance=0;
+    uint32_t element=0;
+
+    if(!Read(p,gx::kDrawBatchCtxModelField,instance) ||
+       !Read(p,gx::kDrawBatchCtxElementField,element) ||
+       !instance || !element)
+        return;
+
+    Json j;
+    j.Str("event","m2_batch_after_native_draw");
+    j.Str(
+        "correlation",
+        "direct_native_M2_batch_context_post_call_not_final_device_ownership"
+    );
+    j.Str("route",route);
+
+    if(!Instance(j,instance))
+        return;
+
+    j.Str("element",Pointer(element));
+
+    Field<uint32_t>(
+        j,
+        "requested_co_instance_run",
+        element,
+        gx::kM2ElementRunLengthField
+    );
+
+    Field<uint32_t>(
+        j,
+        "batch_index",
+        element,
+        m2::kOffElementBatchIndex
+    );
+
+    uint32_t section=0;
+    if(Read(element,gx::kM2ElementSectionField,section) && section) {
+        j.Str("section",Pointer(section));
+
+        wxl::structure::m2::M2SkinSection sec{};
+        if(ReadBytes(section,&sec,sizeof(sec))) {
+            j.Num("section_id",sec.skinSectionId);
+            j.Num("section_level_raw",sec.level);
+            j.Num("section_vertices",sec.vertexCount);
+            j.Num("section_indices",sec.indexCount);
+            j.Num("section_bones",sec.boneCount);
+        }
+    } else {
+        j.Raw("section","null");
+    }
+
+    if(auto* d=LiveD3D()) {
+        Hardware(j,d,"after_native_M2_batch");
+    } else {
+        j.Str("hardware_observation_phase","after_native_M2_batch");
+        j.Raw("hardware_state","null");
+    }
+
+    ++counts[1];
+    ++windowCounts[1];
+    Emit(j);
+}
+
+void __fastcall HookM2TriangleBatch(void* ctx,void* edx) {
+    originalM2TriangleBatch(ctx,edx);
+
+    try {
+        ObserveM2Batch(ctx,"triangle_batch");
+    } catch(...) {
+        ++errors;
+    }
+}
+
+void __fastcall HookM2DoodadBatch(
+    void* ctx,
+    void* edx,
+    void* elements,
+    void* indices
+) {
+    originalM2DoodadBatch(ctx,edx,elements,indices);
+
+    try {
+        ObserveM2Batch(ctx,"batched_doodad");
+    } catch(...) {
+        ++errors;
+    }
+}
+
 void __fastcall HookDraw(void* device,void* edx,uint32_t* batch,int indexed) {
     auto caller=reinterpret_cast<uintptr_t>(_ReturnAddress());
+
+    if(ready && sceneDepth &&
+       GetCurrentThreadId()==renderThread &&
+       config.Samples(frame)) {
+        ++rawGxDrawCallsWindow;
+        if(pendingM2Material)
+            ++rawGxDrawM2TokenWindow;
+        if(pendingWmoMaterial)
+            ++rawGxDrawWmoTokenWindow;
+    }
 
     // Both tokens are ordering correlations only. Never promote either to
     // one-to-one draw ownership without separate proof.
@@ -687,7 +831,11 @@ void __fastcall HookDraw(void* device,void* edx,uint32_t* batch,int indexed) {
             Field<uint32_t>(j,"index_count",reinterpret_cast<uintptr_t>(batch),gx::kGxBatchIndexCount);
             uint32_t raw=0;
             if(Read(reinterpret_cast<uintptr_t>(device),gx::kD3DDeviceField,raw) && raw)
-                Hardware(j,reinterpret_cast<IDirect3DDevice9*>(raw));
+                Hardware(
+                    j,
+                    reinterpret_cast<IDirect3DDevice9*>(raw),
+                    "after_native_GxDeviceDraw"
+                );
             ++counts[1];
             ++windowCounts[1];
             Emit(j);
@@ -710,7 +858,11 @@ void __fastcall HookDraw(void* device,void* edx,uint32_t* batch,int indexed) {
             Field<uint32_t>(j,"index_count",reinterpret_cast<uintptr_t>(batch),gx::kGxBatchIndexCount);
             uint32_t raw=0;
             if(Read(reinterpret_cast<uintptr_t>(device),gx::kD3DDeviceField,raw) && raw)
-                Hardware(j,reinterpret_cast<IDirect3DDevice9*>(raw));
+                Hardware(
+                    j,
+                    reinterpret_cast<IDirect3DDevice9*>(raw),
+                    "after_native_GxDeviceDraw"
+                );
             ++counts[5];
             ++windowCounts[5];
             Emit(j);
@@ -747,6 +899,9 @@ void Begin(void*,const void*) {
         pendingWmoMaterial=0;
         pendingWmoBatch=0;
         windowCounts={};
+        rawGxDrawCallsWindow=0;
+        rawGxDrawM2TokenWindow=0;
+        rawGxDrawWmoTokenWindow=0;
     }
     ++sceneDepth;
     if(config.Samples(frame) && sceneDepth==1) {
@@ -766,6 +921,9 @@ void End(void*,const void*) {
             j.Str("event","sample_end");
             j.Num("windows",windows);
             j.Num("capture_exceptions",errors);
+            j.Num("raw_gx_device_draw_calls",rawGxDrawCallsWindow);
+            j.Num("raw_gx_device_draw_m2_token_calls",rawGxDrawM2TokenWindow);
+            j.Num("raw_gx_device_draw_wmo_token_calls",rawGxDrawWmoTokenWindow);
             for(unsigned i=0;i<6;++i) {
                 auto key="records_"+std::to_string(i);
                 j.Num(key.c_str(),counts[i]);
@@ -797,6 +955,26 @@ bool Install() {
         // priority native/R4 setters before reading; no duplicated R4 logic.
         bool ok=wxl::hook::Install("R7OutlineMaterial",m2::kSetupMaterial,&HookMaterial,&originalMaterial,-1000);
         ok &= wxl::hook::Install("R7OutlineDraw",gx::kGxDeviceDraw,&HookDraw,&originalDraw,-1000);
+
+        // Direct M2 draw-route observers. These are outer read-only wrappers
+        // around the native/WXL batch chain. The triangle route already has
+        // the production wide-index hook at normal priority; -1000 observes
+        // after that complete chain returns without replacing its behaviour.
+        ok &= wxl::hook::Install(
+            "R8MaterialM2TriangleBatch",
+            gx::kDrawTriangleBatch,
+            &HookM2TriangleBatch,
+            &originalM2TriangleBatch,
+            -1000
+        );
+        ok &= wxl::hook::Install(
+            "R8MaterialM2DoodadBatch",
+            gx::kDrawBatchDoodad,
+            &HookM2DoodadBatch,
+            &originalM2DoodadBatch,
+            -1000
+        );
+
         ok &= wxl::hook::Install("R7OutlineReadiness",m2::kIsDrawable,&HookReady,&originalReady,-1000);
         ok &= wxl::hook::Install("R7OutlineBatch",m2::kIsBatchDoodadCompatible,&HookBatch,&originalBatch,-1000);
 
@@ -816,6 +994,7 @@ bool Install() {
         j.Str("object_draw_binding","ordering_correlation_requires_validation");
         j.Str("wmo_draw_binding","ordering_correlation_requires_validation");
         j.Str("step10c_material_observer","enabled");
+        j.Str("step10c04_direct_hardware_bridge","enabled");
         j.Num("start",config.start);j.Num("stride",config.stride);j.Num("windows",config.windows);Emit(j);sink.flush();
         WLOG_INFO("r7-outline: read-only capture %s start=%u stride=%u windows=%u",file.c_str(),config.start,config.stride,config.windows);
         return true;
