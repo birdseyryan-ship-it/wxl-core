@@ -1,0 +1,199 @@
+name: R8 Step10 Exact Classic WMO M2 DXBC Disassembly
+
+on:
+  push:
+    branches:
+      - 'r8-step10-dxbc-analysis-*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  acquire_extract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout exact analysis commit
+        uses: actions/checkout@v4
+
+      - name: Show authority
+        run: |
+          echo "commit=$GITHUB_SHA"
+          git status --short --branch
+
+      - name: Compile analysis tooling
+        run: |
+          python3 -m py_compile \
+            tools/r6-water-acquire/fetch_classic_water.py \
+            tools/r6-water-acquire/fetch_classic_water_archives.py \
+            tools/r6-water-acquire/gxsh_extract_dxbc.py \
+            tools/r8-step10-analysis/acquire_extract_dedupe.py
+
+      - name: Acquire exact 31650 objects and extract unique DXBC
+        run: |
+          python3 \
+            tools/r8-step10-analysis/acquire_extract_dedupe.py
+
+      - name: Show preparation summary
+        run: |
+          cat r8-step10-stage/STEP10B05B_PREP_SUMMARY.txt
+          cat r8-step10-stage/DXBC_SUMMARY.txt
+
+      - name: Package unique DXBC corpus
+        run: |
+          tar -czf r8-step10-unique-dxbc.tar.gz \
+            -C r8-step10-stage \
+            unique_dxbc \
+            UNIQUE_DXBC_MAP.tsv \
+            DXBC_MANIFEST.json \
+            DXBC_MANIFEST.tsv \
+            DXBC_SUMMARY.txt \
+            STEP10B05B_PREP_SUMMARY.txt \
+            acquired/ARCHIVE_FALLBACK.json \
+            acquired/ARCHIVE_FALLBACK_SUMMARY.txt
+
+          sha256sum \
+            r8-step10-unique-dxbc.tar.gz \
+            > r8-step10-unique-dxbc.tar.gz.sha256
+
+          du -h r8-step10-unique-dxbc.tar.gz
+
+      - name: Upload exact unique DXBC corpus
+        uses: actions/upload-artifact@v4
+        with:
+          name: r8-step10-unique-dxbc-${{ github.sha }}
+          path: |
+            r8-step10-unique-dxbc.tar.gz
+            r8-step10-unique-dxbc.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  disassemble:
+    needs: acquire_extract
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout exact analysis commit
+        uses: actions/checkout@v4
+
+      - name: Download CKey-verified unique DXBC corpus
+        uses: actions/download-artifact@v4
+        with:
+          name: r8-step10-unique-dxbc-${{ github.sha }}
+          path: .
+
+      - name: Verify corpus archive SHA256
+        shell: pwsh
+        run: |
+          $expected = (
+            Get-Content r8-step10-unique-dxbc.tar.gz.sha256
+          ).Split()[0].ToLower()
+
+          $actual = (
+            Get-FileHash `
+              r8-step10-unique-dxbc.tar.gz `
+              -Algorithm SHA256
+          ).Hash.ToLower()
+
+          Write-Host "expected=$expected"
+          Write-Host "actual=$actual"
+
+          if ($actual -ne $expected) {
+            throw "Unique-DXBC archive SHA256 mismatch"
+          }
+
+      - name: Extract exact unique DXBC corpus
+        shell: pwsh
+        run: |
+          tar -xzf r8-step10-unique-dxbc.tar.gz
+
+          $count = (
+            Get-ChildItem unique_dxbc `
+              -Filter *.dxbc `
+              -File
+          ).Count
+
+          Write-Host "unique_dxbc_files=$count"
+
+          if ($count -ne 9228) {
+            throw "Expected exactly 9228 unique DXBC files"
+          }
+
+      - name: Compile exact CP08 Microsoft disassembler wrapper
+        shell: pwsh
+        run: |
+          python -m py_compile `
+            tools/r6-water-acquire/disassemble_dxbc.py `
+            tools/r8-step10-analysis/summarize_disassembly.py
+
+      - name: Disassemble all 9228 unique DXBC with D3DCompiler 47
+        shell: pwsh
+        run: |
+          python `
+            tools/r6-water-acquire/disassemble_dxbc.py `
+            unique_dxbc
+
+      - name: Verify complete assembly corpus
+        shell: pwsh
+        run: |
+          $count = (
+            Get-ChildItem unique_dxbc `
+              -Filter *.asm `
+              -File
+          ).Count
+
+          Write-Host "assembly_files=$count"
+
+          if ($count -ne 9228) {
+            throw "Expected exactly 9228 assembly files"
+          }
+
+      - name: Deduplicate exact disassembly text and preserve provenance
+        shell: pwsh
+        run: |
+          python `
+            tools/r8-step10-analysis/summarize_disassembly.py `
+            UNIQUE_DXBC_MAP.tsv `
+            DISASSEMBLY_MANIFEST.json
+
+          Get-Content DISASSEMBLY_GATE.txt
+
+      - name: Package exact disassembly evidence
+        shell: pwsh
+        run: |
+          tar -czf r8-step10-disassembly.tar.gz `
+            unique_asm `
+            ASM_DEDUPE.tsv `
+            DISASSEMBLY_MANIFEST.json `
+            DISASSEMBLY_SUMMARY.txt `
+            DISASSEMBLY_GATE.txt `
+            UNIQUE_DXBC_MAP.tsv
+
+          $hash = (
+            Get-FileHash `
+              r8-step10-disassembly.tar.gz `
+              -Algorithm SHA256
+          ).Hash.ToLower()
+
+          "$hash  r8-step10-disassembly.tar.gz" |
+            Set-Content `
+              r8-step10-disassembly.tar.gz.sha256 `
+              -Encoding ascii
+
+          Get-Item r8-step10-disassembly.tar.gz |
+            Format-List Name,Length
+
+      - name: Upload exact Classic WMO M2 disassembly evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: r8-step10-disassembly-${{ github.sha }}
+          path: |
+            r8-step10-disassembly.tar.gz
+            r8-step10-disassembly.tar.gz.sha256
+            DISASSEMBLY_GATE.txt
+            DISASSEMBLY_SUMMARY.txt
+          if-no-files-found: error
+          retention-days: 14
