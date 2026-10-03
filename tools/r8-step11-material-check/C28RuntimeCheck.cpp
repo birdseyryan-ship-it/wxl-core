@@ -14,7 +14,8 @@
 #include <vector>
 
 static unsigned checks = 0;
-static void Check(bool ok) { ++checks; if (!ok) { std::fprintf(stderr, "FAIL runtime check %u\n", checks); std::exit(1); } }
+static void CheckAt(bool ok, int line) { ++checks; if (!ok) { std::fprintf(stderr, "FAIL runtime check %u line=%d\n", checks, line); std::exit(1); } }
+#define Check(ok) CheckAt((ok), __LINE__)
 static std::map<std::uintptr_t, std::vector<unsigned char>> memory;
 static std::vector<std::string> logs;
 static std::string throwLog;
@@ -86,13 +87,13 @@ static HRESULT WINAPI GetVS(IDirect3DDevice9* ptr, IDirect3DVertexShader9** out)
 static HRESULT WINAPI GetPS(IDirect3DDevice9* ptr, IDirect3DPixelShader9** out)
 { auto* s = reinterpret_cast<DeviceStub*>(ptr)->ps; ++s->refs; *out = reinterpret_cast<IDirect3DPixelShader9*>(s); return S_OK; }
 static HRESULT WINAPI OriginalDP(IDirect3DDevice9* ptr, D3DPRIMITIVETYPE t, UINT start, UINT n)
-{ auto* d = reinterpret_cast<DeviceStub*>(ptr); ++d->calls; d->arguments = {t,start,n}; return d->result; }
+{ auto* d = reinterpret_cast<DeviceStub*>(ptr); ++d->calls; d->arguments = {static_cast<std::uintptr_t>(t),start,n}; return d->result; }
 static HRESULT WINAPI OriginalDIP(IDirect3DDevice9* ptr, D3DPRIMITIVETYPE t, INT base, UINT min, UINT vertices, UINT start, UINT n)
-{ auto* d = reinterpret_cast<DeviceStub*>(ptr); ++d->calls; d->arguments = {t,static_cast<UINT>(base),min,vertices,start,n}; return d->result; }
+{ auto* d = reinterpret_cast<DeviceStub*>(ptr); ++d->calls; d->arguments = {static_cast<std::uintptr_t>(t),static_cast<UINT>(base),min,vertices,start,n}; return d->result; }
 static HRESULT WINAPI OriginalDPUP(IDirect3DDevice9* ptr, D3DPRIMITIVETYPE t, UINT n, const void* data, UINT stride)
-{ auto* d = reinterpret_cast<DeviceStub*>(ptr); ++d->calls; d->arguments = {t,n,reinterpret_cast<std::uintptr_t>(data),stride}; return d->result; }
+{ auto* d = reinterpret_cast<DeviceStub*>(ptr); ++d->calls; d->arguments = {static_cast<std::uintptr_t>(t),n,reinterpret_cast<std::uintptr_t>(data),stride}; return d->result; }
 static HRESULT WINAPI OriginalDIPUP(IDirect3DDevice9* ptr, D3DPRIMITIVETYPE t, UINT min, UINT vertices, UINT n, const void* indices, D3DFORMAT fmt, const void* data, UINT stride)
-{ auto* d = reinterpret_cast<DeviceStub*>(ptr); ++d->calls; d->arguments = {t,min,vertices,n,reinterpret_cast<std::uintptr_t>(indices),fmt,reinterpret_cast<std::uintptr_t>(data),stride}; return d->result; }
+{ auto* d = reinterpret_cast<DeviceStub*>(ptr); ++d->calls; d->arguments = {static_cast<std::uintptr_t>(t),min,vertices,n,reinterpret_cast<std::uintptr_t>(indices),static_cast<std::uintptr_t>(fmt),reinterpret_cast<std::uintptr_t>(data),stride}; return d->result; }
 template<class T> static void Put(std::uintptr_t address, const T& value)
 { auto* b = reinterpret_cast<const unsigned char*>(&value); memory[address] = std::vector<unsigned char>(b, b + sizeof(value)); }
 static std::vector<unsigned char> Load(const std::string& file)
