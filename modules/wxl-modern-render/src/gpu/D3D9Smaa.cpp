@@ -13,6 +13,7 @@
 // The WoW UI is drawn only after this returns.
 
 #include "gpu/D3D9Smaa.hpp"
+#include "gpu/PerfProbe.hpp"
 
 #include "common/Log.hpp"
 
@@ -821,6 +822,9 @@ float4 main(float2 texcoord : TEXCOORD0,
             height == 0)
             return false;
 
+        perf::CpuScope totalPerf(
+            perf::CpuRegion::SmaaTotal);
+
         if (g_device != device)
         {
             ReleaseAll();
@@ -890,8 +894,21 @@ float4 main(float2 texcoord : TEXCOORD0,
         device->SetTexture(0, scene);
         SetLinearClamp(device, 0);
 
+        const auto edgeStart =
+            perf::CpuBegin();
+
+        const HRESULT edgeDrawHr =
+            DrawFullscreen(
+                device,
+                width,
+                height);
+
+        perf::CpuEnd(
+            perf::CpuRegion::SmaaEdgeDraw,
+            edgeStart);
+
         if (!CheckDraw(
-                DrawFullscreen(device, width, height),
+                edgeDrawHr,
                 "edge"))
         {
             UnbindTextures(device);
@@ -940,8 +957,21 @@ float4 main(float2 texcoord : TEXCOORD0,
         SetLinearClamp(device, 1);
         SetPointClamp(device, 2);
 
+        const auto blendStart =
+            perf::CpuBegin();
+
+        const HRESULT blendDrawHr =
+            DrawFullscreen(
+                device,
+                width,
+                height);
+
+        perf::CpuEnd(
+            perf::CpuRegion::SmaaBlendDraw,
+            blendStart);
+
         if (!CheckDraw(
-                DrawFullscreen(device, width, height),
+                blendDrawHr,
                 "blend-weight"))
         {
             UnbindTextures(device);
@@ -975,8 +1005,21 @@ float4 main(float2 texcoord : TEXCOORD0,
         SetLinearClamp(device, 0);
         SetLinearClamp(device, 1);
 
+        const auto neighborhoodStart =
+            perf::CpuBegin();
+
+        const HRESULT neighborhoodDrawHr =
+            DrawFullscreen(
+                device,
+                width,
+                height);
+
+        perf::CpuEnd(
+            perf::CpuRegion::SmaaNeighborhoodDraw,
+            neighborhoodStart);
+
         const bool ok = CheckDraw(
-            DrawFullscreen(device, width, height),
+            neighborhoodDrawHr,
             "neighborhood");
 
         UnbindTextures(device);

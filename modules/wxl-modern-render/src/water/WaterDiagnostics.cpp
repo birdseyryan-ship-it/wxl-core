@@ -5,6 +5,7 @@
 #include "water/Slot3ProductionRuntime.hpp"
 #include "water/Slot3WrathBridge.hpp"
 #include "water/Slot3SnapshotPolicy.hpp"
+#include "gpu/PerfProbe.hpp"
 #include <new>
 #include "client/CWorldScene/LiquidDiagnostics.hpp"
 #include "client/CWorldScene/RenderModernBridge.hpp"
@@ -33,6 +34,7 @@ namespace ev=wxl::events;
 namespace gxoff=wxl::offsets::engine::gx;
 namespace liqoff=wxl::offsets::engine::liquid;
 namespace camoff=wxl::offsets::engine::camera;
+namespace perf=wxl::scripts::render_modern::perf;
 constexpr size_t kQueueLimit=2*1024*1024,kFlushLimit=256*1024;
 constexpr const char* kExeSha="57dd8955fd7238b00969f6011cdaa13dca14daa5849d1f9be64152bd4c7fe5da";
 template<class T> struct Com {
@@ -1185,18 +1187,32 @@ uint64_t TrackDraw(IDirect3DDevice9* d,bool liquidScope,unsigned apiIndex,const 
 void CopyPreWaterAfterEnd(const Probe& before,HRESULT endHr,bool depth,
                          HRESULT& colour,HRESULT& depth1,HRESULT& depth2,HRESULT& begin) noexcept {
     if(SUCCEEDED(endHr)) {
+        const auto colourStart=perf::CpuBegin();
         colour=device->StretchRect(before.rt.p,nullptr,snapshotSurface,nullptr,D3DTEXF_NONE);
+        perf::CpuEnd(perf::CpuRegion::WaterColourCopy,colourStart);
+
         if(depth) {
+            const auto depth1Start=perf::CpuBegin();
             depth1=device->StretchRect(before.ds.p,nullptr,snapshotDepthPlainSurface,nullptr,D3DTEXF_NONE);
-            if(SUCCEEDED(depth1)) depth2=device->StretchRect(snapshotDepthPlainSurface,nullptr,snapshotDepthSurface,nullptr,D3DTEXF_NONE);
+            perf::CpuEnd(perf::CpuRegion::WaterDepthStage1,depth1Start);
+
+            if(SUCCEEDED(depth1)) {
+                const auto depth2Start=perf::CpuBegin();
+                depth2=device->StretchRect(snapshotDepthPlainSurface,nullptr,snapshotDepthSurface,nullptr,D3DTEXF_NONE);
+                perf::CpuEnd(perf::CpuRegion::WaterDepthStage2,depth2Start);
+            }
         }
+
         // Exactly one BeginScene after every successful direct-original EndScene.
+        const auto beginStart=perf::CpuBegin();
         begin=device->BeginScene();
+        perf::CpuEnd(perf::CpuRegion::WaterBeginScene,beginStart);
     }
 }
 // Continuous path performs all resource work before allocating any log text.
 // It reuses the same target owners, transport bracket and freshness stamps.
 void ProductionSnapshotAtWater() noexcept {
+    perf::CpuScope snapshotPerf(perf::CpuRegion::WaterSnapshotTotal);
     waterCandidateSeen=true;snapshotValid=depthSnapshotValid=false;
     phase="first_water_material_begin";waterCandidateOrdinal=globalDrawOrdinal;
     if(liquidDrawsScene || !slot3::SnapshotAttemptPermitted(ProductionActive(),false,snapshotAttempts,snapshotGenerationAttempts)) return;
@@ -1211,7 +1227,11 @@ void ProductionSnapshotAtWater() noexcept {
        !EnsureSnapshotDepthTarget(device,depth,depthTarget)) return;
     snapshotSourceRtToken=reinterpret_cast<std::uintptr_t>(before.rt.p);
     ++snapshotAttempts;++snapshotGenerationAttempts;
+
+    const auto endStart=perf::CpuBegin();
     const HRESULT end=static_cast<HRESULT>(wxl::runtime::render::EndSceneForPostProcess(device));
+    perf::CpuEnd(perf::CpuRegion::WaterEndScene,endStart);
+
     HRESULT copy=D3DERR_INVALIDCALL,depth1=D3DERR_INVALIDCALL,depth2=D3DERR_INVALIDCALL,begin=D3DERR_INVALIDCALL;
     CopyPreWaterAfterEnd(before,end,true,copy,depth1,depth2,begin);
     Probe after;bool preserved=false;

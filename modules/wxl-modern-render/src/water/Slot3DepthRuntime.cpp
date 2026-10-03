@@ -5,10 +5,12 @@
 #include "water/Slot3GpuState.hpp"
 #include "water/Slot3Shaders.hpp"
 #include "water/Slot3ShaderCompileOptions.hpp"
+#include "gpu/PerfProbe.hpp"
 #include <d3d9.h>
 #include <d3dcompiler.h>
 
 namespace wxl::water::slot3 {
+namespace perf=wxl::scripts::render_modern::perf;
 namespace {
 
 // Extension-owned API transport format.
@@ -176,6 +178,9 @@ DepthRuntime::Convert(
     {
         return ConvertStatus::FailedRestored;
     }
+
+    perf::CpuScope depthPerf(
+        perf::CpuRegion::WaterLinearDepth);
 
     SavedState saved;
 

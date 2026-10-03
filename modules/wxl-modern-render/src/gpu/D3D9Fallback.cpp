@@ -18,6 +18,7 @@
 #include "common/Log.hpp"
 #include "gpu/D3D9Smaa.hpp"
 #include "gpu/D3D9DepthProbe.hpp"
+#include "gpu/PerfProbe.hpp"
 
 #include "../../vendor/fxaa/Fxaa3_11_embed.hpp"
 
@@ -1519,6 +1520,8 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
 
     void PrepareForReset()
     {
+        perf::Reset();
+
         if (Available())
             ReleaseRuntime();
     }
@@ -1534,6 +1537,9 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
         if (!Available() || !device)
             return false;
 
+        perf::CpuScope framePerf(
+            perf::CpuRegion::FallbackFrameTotal);
+
         if (g_device != device)
         {
             ReleaseRuntime();
@@ -1541,6 +1547,9 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             WLOG_INFO(
                 "wxl-modern-d3d9: Proton/Wine fallback backend active");
         }
+
+        perf::ProbeGpuQueryCapabilities(
+            device);
 
         // Keep the earlier capability probe for evidence, now after the
         // device-change reset so it runs only once per live device.
@@ -1742,12 +1751,32 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             return false;
         }
 
+        perf::FrameBoundary(
+            bbDesc.Width,
+            bbDesc.Height,
+            static_cast<unsigned>(
+                bbDesc.MultiSampleType),
+            aoActive,
+            useSmaa);
+
         IDirect3DStateBlock9* state = nullptr;
         IDirect3DSurface9* oldRt = nullptr;
         IDirect3DSurface9* oldDepth = nullptr;
         D3DVIEWPORT9 oldViewport = {};
 
-        if (FAILED(device->CreateStateBlock(D3DSBT_ALL, &state)) ||
+        const auto stateBlockStart =
+            perf::CpuBegin();
+
+        const HRESULT stateBlockHr =
+            device->CreateStateBlock(
+                D3DSBT_ALL,
+                &state);
+
+        perf::CpuEnd(
+            perf::CpuRegion::FallbackStateBlock,
+            stateBlockStart);
+
+        if (FAILED(stateBlockHr) ||
             !state ||
             FAILED(device->GetRenderTarget(0, &oldRt)) ||
             !oldRt ||
@@ -1805,8 +1834,15 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
         // StretchRect cannot execute inside BeginScene/EndScene. Call the
         // original EndScene target directly so the ImGui/UI hook is not emitted
         // in the middle of this world-only post-process.
+        const auto endSceneStart =
+            perf::CpuBegin();
+
         hr = static_cast<HRESULT>(
             wxl::runtime::render::EndSceneForPostProcess(device));
+
+        perf::CpuEnd(
+            perf::CpuRegion::FallbackEndScene,
+            endSceneStart);
 
         if (FAILED(hr))
         {
@@ -1826,10 +1862,17 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             return false;
         }
 
+        const auto colourResolveStart =
+            perf::CpuBegin();
+
         const HRESULT stretchHr = device->StretchRect(
             backbuffer, nullptr,
             g_sceneSurface, nullptr,
             D3DTEXF_NONE);
+
+        perf::CpuEnd(
+            perf::CpuRegion::FallbackColourResolve,
+            colourResolveStart);
 
         HRESULT depthStretchHr = S_OK;
 
@@ -1843,6 +1886,9 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                 depthMode == 8 ||
                 depthMode == 9)
             {
+                const auto depthStage1Start =
+                    perf::CpuBegin();
+
                 const HRESULT stage1 =
                     device->StretchRect(
                         depthSource,
@@ -1851,10 +1897,17 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                         nullptr,
                         D3DTEXF_NONE);
 
+                perf::CpuEnd(
+                    perf::CpuRegion::FallbackDepthStage1,
+                    depthStage1Start);
+
                 HRESULT stage2 = D3DERR_INVALIDCALL;
 
                 if (SUCCEEDED(stage1))
                 {
+                    const auto depthStage2Start =
+                        perf::CpuBegin();
+
                     stage2 =
                         device->StretchRect(
                             g_depthPlainSurface,
@@ -1862,6 +1915,10 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                             g_depthSurface,
                             nullptr,
                             D3DTEXF_NONE);
+
+                    perf::CpuEnd(
+                        perf::CpuRegion::FallbackDepthStage2,
+                        depthStage2Start);
                 }
 
                 depthStretchHr =
@@ -1881,6 +1938,9 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             }
             else
             {
+                const auto directDepthStart =
+                    perf::CpuBegin();
+
                 depthStretchHr =
                     device->StretchRect(
                         depthSource,
@@ -1888,6 +1948,10 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                         g_depthSurface,
                         nullptr,
                         D3DTEXF_NONE);
+
+                perf::CpuEnd(
+                    perf::CpuRegion::FallbackDepthStage2,
+                    directDepthStart);
 
                 if (!g_loggedDepthCopyPass)
                 {
@@ -1906,7 +1970,15 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
         }
 
         // WoW still needs an open scene for the remaining UI work this frame.
-        const HRESULT beginHr = device->BeginScene();
+        const auto beginSceneStart =
+            perf::CpuBegin();
+
+        const HRESULT beginHr =
+            device->BeginScene();
+
+        perf::CpuEnd(
+            perf::CpuRegion::FallbackBeginScene,
+            beginSceneStart);
 
         if (FAILED(beginHr))
         {
@@ -2226,12 +2298,19 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                 { aoW - 0.5f,  aoH - 0.5f,0.0f, 1.0f, 1.0f, 1.0f },
             };
 
+            const auto aoRawStart =
+                perf::CpuBegin();
+
             const HRESULT aoDrawHr =
                 device->DrawPrimitiveUP(
                     D3DPT_TRIANGLESTRIP,
                     2,
                     aoQuad,
                     sizeof(FsVertex));
+
+            perf::CpuEnd(
+                perf::CpuRegion::AoRawDraw,
+                aoRawStart);
 
             device->SetTexture(0, nullptr);
 
@@ -2378,12 +2457,19 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                 { w - 0.5f,  h - 0.5f,0.0f, 1.0f, 1.0f, 1.0f },
             };
 
+            const auto aoCompositeStart =
+                perf::CpuBegin();
+
             const HRESULT denoiseDrawHr =
                 device->DrawPrimitiveUP(
                     D3DPT_TRIANGLESTRIP,
                     2,
                     fullQuad,
                     sizeof(FsVertex));
+
+            perf::CpuEnd(
+                perf::CpuRegion::AoCompositeDraw,
+                aoCompositeStart);
 
             device->SetTexture(0, nullptr);
             device->SetTexture(1, nullptr);
