@@ -1,0 +1,138 @@
+name: R8 Step11 WMO PerPixel Candidate
+
+on:
+  push:
+    branches:
+      - 'r8-step11-integration-*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  qualify-step11b02b1:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout exact candidate commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Show exact source authority
+        run: |
+          Write-Host "Commit: $env:GITHUB_SHA"
+          git status --short --branch
+          git log -1 --format="Commit: %H%nParent: %P%nTree: %T%nSubject: %s"
+
+      - name: Run structural-material source tests
+        run: |
+          python -m unittest discover `
+            -s tools/r8-step11-material-check `
+            -p "test_structural_material_source.py" `
+            -v
+
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Configure Win32
+        run: |
+          cmake -S . -B build-step11 -A Win32
+
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Build WarcraftXL only
+        run: |
+          cmake --build build-step11 `
+            --config Release `
+            --target WarcraftXL `
+            --parallel
+
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Verify package contains no protected binaries
+        run: |
+          New-Item -ItemType Directory -Force -Path dist-step11 | Out-Null
+
+          Copy-Item `
+            "build-step11\Release\WarcraftXL.dll" `
+            "dist-step11\WarcraftXL.dll"
+
+          if (
+            (Test-Path "dist-step11\Wow.exe") -or
+            (Test-Path "dist-step11\d3d9.dll")
+          ) {
+            throw "Protected binary entered Step11 package"
+          }
+
+      - name: Record source and binary authority
+        run: |
+          $dllHash = (
+            Get-FileHash `
+              -Algorithm SHA256 `
+              "dist-step11\WarcraftXL.dll"
+          ).Hash.ToLower()
+
+          "$dllHash  WarcraftXL.dll" |
+            Set-Content "dist-step11\SHA256SUMS.txt"
+
+          $tree = git show -s --format='%T' HEAD
+          $parent = git show -s --format='%P' HEAD
+
+          $authority = [ordered]@{
+            commit = "$env:GITHUB_SHA"
+            parent = "$parent"
+            tree = "$tree"
+            required_parent = "ed58835770ccadbb5fedd70e6840b30f572edba7"
+            required_base = "1f03309da4639771d74c8957c85bd9653069b7c4"
+            step = "R8_STEP11B02B1"
+            mode = "opt_in_simple_directional_per_pixel"
+            default_off = $true
+            wmo_only = $true
+            m2_changed = $false
+            families = "Diffuse,Opaque"
+            selected_vs_contract = "exact_simple_MapObjDiffuse_T1_hashes_only"
+            raw_vs_contract = "exact_even_sibling_hash"
+            pixel_contract = "exact_family_and_pix_hash"
+            pixel_slots = "5,7"
+            pix15 = "stock_fallback"
+            udiffuse = "stock_fallback"
+            local_light_vs = "stock_fallback"
+            specular = "stock_fallback"
+            unknown_routes = "stock_fallback"
+            direct_setshader = $false
+            gxstate_substitution = $true
+            gx_device_draw_owner = $false
+            native_texture_sampling = "preserved"
+            native_shadow_program = "preserved"
+            native_fog_program = "preserved"
+            native_alpha_program = "preserved"
+            device_reset_qualification = "not_yet_performed"
+          }
+
+          $authority |
+            ConvertTo-Json |
+            Set-Content "dist-step11\SOURCE_AUTHORITY.json"
+
+          Get-Content "dist-step11\SHA256SUMS.txt"
+          Get-Content "dist-step11\SOURCE_AUTHORITY.json"
+
+      - name: Upload Step11B02B1 candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: r8-step11b02b1-wmo-perpixel-${{ github.sha }}
+          path: |
+            dist-step11/WarcraftXL.dll
+            dist-step11/SHA256SUMS.txt
+            dist-step11/SOURCE_AUTHORITY.json
+          if-no-files-found: error
+          retention-days: 14

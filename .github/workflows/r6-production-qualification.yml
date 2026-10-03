@@ -1,0 +1,25 @@
+name: R6 Production Assembly Qualification
+on:
+  push:
+    branches: ['gfx-r6-work-qualification-*']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  qualify:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - name: Win32 MSVC build and all R5 R6 gates
+        run: python tools/r6-slot3-check/qualify_win32.py
+      - name: Preserve build and qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r6-win32-evidence-${{ github.sha }}
+          path: qualification-output/
+          if-no-files-found: error
+          retention-days: 30

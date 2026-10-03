@@ -64,6 +64,8 @@ namespace wxl::events
         OnGrassWind,     // grass wind integrator advanced this frame (GrassWindArgs)
         OnAdtHeightBlend,// a terrain PS permutation was patched for height blending (AdtHeightBlendArgs)
         OnM2NativeLoad,  // a modern MD21 model was direct-filled by the native reader (M2NativeLoadArgs)
+        // R6 appends this event so every pre-existing numeric event ID remains unchanged.
+        OnWorldSceneBegin, // world-scene pass is about to draw               (WorldSceneBeginArgs)
         Count
     };
 
@@ -107,10 +109,22 @@ namespace wxl::events
     /** @brief Args for OnWorldRender. */
     struct WorldRenderArgs    { void* device; };
     /**
+     * @brief Args for OnWorldSceneBegin, emitted immediately before the native world-scene pass.
+     *        R6 uses this as a read-only ordering marker; subscribers query any D3D state synchronously.
+     */
+    struct WorldSceneBeginArgs { void* device; };
+    /**
      * @brief Args for OnWorldRenderEnd: the world -> UI boundary of the frame. A subscriber draws
      *        post-world effects here, before the client renders the interface on top.
      */
-    struct WorldRenderEndArgs { void* device; };
+    struct WorldRenderEndArgs
+    {
+        void*        device;
+        void*        superSampleSource;
+        float        ssaaFactor;
+        void*        depthSource;
+        const float* proj;
+    };
     /**
      * @brief Args for OnWorldSceneEnd: the world is drawn and the camera matrices that drew it are
      *        still on the device. Its caller puts the pre-world projection and view back immediately
@@ -123,7 +137,26 @@ namespace wxl::events
      *        not reliably that surface -- a post-process pass inside the call can leave its own -- and
      *        depth-testing against the wrong one rejects every pixel without reporting an error.
      */
-    struct WorldSceneEndArgs  { void* device; void* sceneDepth; };
+    struct WorldSceneEndArgs
+    {
+        void*        device;
+        void*        sceneDepth;
+
+        // R3D3C: exact D3D state captured immediately before the native
+        // world scene pass. sceneProjection points to a synchronous
+        // stack snapshot valid for the duration of this event emission.
+        const float* sceneProjection;
+
+        uint32_t viewportX;
+        uint32_t viewportY;
+        uint32_t viewportWidth;
+        uint32_t viewportHeight;
+        float    viewportMinZ;
+        float    viewportMaxZ;
+
+        bool sceneProjectionValid;
+        bool viewportValid;
+    };
     /**
      * @brief Args for OnLiquidRender, fired before the native liquid pass draws. passType is 0 for the
      *        main pass, 1 for the secondary; instanceCount is the visible liquid instances in this pass;

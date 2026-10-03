@@ -95,6 +95,40 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 4)
     target_link_libraries(WarcraftXL PRIVATE minhook d3d9 shell32)
     target_compile_definitions(WarcraftXL PRIVATE ${WXL_DEFS})
 
+    # --- GFX-R3A modern AA validation ---------------------------------------------
+    # Compile the D3D12 framework/effects plus the current-UI-adapted Graphics panel.
+    # R3A exposes colour-only AA (FXAA/SMAA/CMAA2) while SSAO and Render Scale remain
+    # locked until the readable-depth/world redirect is implemented and validated.
+    file(GLOB_RECURSE WXL_RENDER_MODERN_GPU CONFIGURE_DEPENDS
+         "${CMAKE_CURRENT_SOURCE_DIR}/modules/wxl-modern-render/src/gpu/*.cpp")
+
+    file(GLOB_RECURSE WXL_RENDER_MODERN_EFFECTS CONFIGURE_DEPENDS
+         "${CMAKE_CURRENT_SOURCE_DIR}/modules/wxl-modern-render/src/effects/*.cpp")
+
+    target_sources(WarcraftXL PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/modules/wxl-modern-render/src/RenderModernModule.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/modules/wxl-modern-render/src/OverlayPanel.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/modules/wxl-modern-render/src/grass/GrassMotion.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/modules/wxl-modern-render/src/water/WaterDiagnostics.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/modules/wxl-modern-render/src/water/Slot3ShaderRuntime.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/modules/wxl-modern-render/src/water/Slot3ConstantRuntime.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/modules/wxl-modern-render/src/water/Slot3FirstCandidateRuntime.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/modules/wxl-modern-render/src/water/Slot3ProductionRuntime.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/modules/wxl-modern-render/src/water/Slot3WrathBridge.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/modules/wxl-modern-render/src/water/Slot3ConstantProducer.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/modules/wxl-modern-render/src/water/Slot3DepthRuntime.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/modules/wxl-modern-render/src/water/Slot3MaterialRuntime.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/modules/wxl-modern-render/src/water/Slot3ReflectionRuntime.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/modules/wxl-modern-render/src/shadows/ClassicShadows.cpp"
+        ${WXL_RENDER_MODERN_GPU}
+        ${WXL_RENDER_MODERN_EFFECTS})
+
+    target_include_directories(WarcraftXL PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/modules/wxl-modern-render/src")
+
+    target_link_libraries(WarcraftXL PRIVATE d3d12 d3dcompiler)
+    # --- end GFX-R3A modern AA validation ----------------------------------------
+
     source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" FILES ${WXL_CORE_SRC})
 
     # Deploy: copy the freshly linked DLL into the client folder.
@@ -127,6 +161,9 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 4)
     add_library(d3d9 SHARED ${WXL_GPU_SRC} ${WXL_COMMON_SRC})
     set_target_properties(d3d9 PROPERTIES OUTPUT_NAME "d3d9" PREFIX "")
     target_include_directories(d3d9 PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    # GFX-R2: On12 foundation restored from the matching July renderer generation.
+    # Device/Present/Capture require the native D3D12/DXGI/DirectComposition stack.
+    target_link_libraries(d3d9 PRIVATE d3d12 dxgi dcomp d3dcompiler)
     # The proxy shadows a static import of Wow.exe, so a hard dependency of the proxy is a hard
     # dependency of the game. It resolves the system d3d9 at runtime and links nothing beyond the CRT.
     target_link_options(d3d9 PRIVATE "/DEF:${CMAKE_CURRENT_SOURCE_DIR}/src/engine/gpu/Proxy.def")

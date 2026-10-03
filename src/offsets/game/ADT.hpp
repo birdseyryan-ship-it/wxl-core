@@ -795,6 +795,317 @@ namespace wxl::offsets::game::adt
     /// hook for a custom terrain shadowing scheme. __cdecl, caller-cleaned.
     constexpr uintptr_t kBindTerrainShadowMap              = 0x00874660;
 
+    // R5B2-G3A receiver-path authority.
+    //
+    // Wrath exposes two no-argument terrain shadow binding layouts:
+    //
+    //   0x874660:
+    //     state 0x1A -> sampler t5 auxiliary
+    //     state 0x1B -> sampler t6 cascade 0
+    //     state 0x1C -> sampler t7 cascade 1
+    //     state 0x1D -> sampler t8 cascade 2
+    //     therefore 0x1E -> free sampler t9 for cascade 3.
+    //
+    //   0x874760:
+    //     state 0x19 -> sampler t4 auxiliary
+    //     state 0x1A -> sampler t5 cascade 0
+    //     state 0x1B -> sampler t6 cascade 1
+    //     state 0x1C -> sampler t7 cascade 2
+    //     therefore 0x1D -> free sampler t8 for cascade 3.
+    //
+    // 0x685F50 receives the graphics context in ECX and two stack
+    // arguments: Gx texture state and resolved engine Gx texture.
+    // Its texture-state base is 0x15 (GxStateTexture0).
+    constexpr uintptr_t kBindTerrainShadowMapAlt           = 0x00874760;
+
+    // Reuse the canonical terrain-render authorities declared above:
+    //
+    //   kGxDeviceSingleton = 0x00C5DF88
+    //   kSetSamplerTexture  = 0x00685F50
+    //   Map_SamplerBindFn   = exact fastcall wrapper
+    //
+    // Do not duplicate those symbols in the shadow section.
+    constexpr int32_t kGxStateTexture0                     = 0x15;
+    constexpr int32_t kClassicCascade4StatePathA           = 0x1E;
+    constexpr int32_t kClassicCascade4StatePathB           = 0x1D;
+
+    using BindTerrainShadowMapFn =
+        void(__cdecl*)();
+
+    // kSetSamplerTexture uses the canonical Map_SamplerBindFn type
+    // declared in the terrain-render authority block above.
+
+    // --- projected dynamic-shadow cascade pipeline -----------------------------------------
+    // R5 Classic-shadow backport authority:
+    //
+    // 0x874890 builds/updates the stock three-cascade shadow object.
+    // 0x874FB0 subsequently walks native cascade indices 0..active and invokes
+    // the registered per-cascade render callback (0x7BBC50 via 0x00D43164).
+    //
+    // IMPORTANT: the native object contains exactly three packed 0xF4 records.
+    // A fourth native record would overlap the next live array. Classic cascade
+    // #4 therefore belongs to extension-owned sidecar storage and must never be
+    // represented by passing native cascade index 3 into the stock callback.
+    constexpr uintptr_t kBuildShadowCascades               = 0x00874890;
+    constexpr uintptr_t kRenderShadowCascades              = 0x00874FB0;
+    constexpr uintptr_t kShadowCascadeRenderCallback       = 0x007BBC50;
+
+    // Runtime-populated .data/BSS globals.
+    constexpr uintptr_t kShadowRenderCallbackPtr            = 0x00D43164;
+    constexpr uintptr_t kShadowMapDimension                 = 0x00D43150;
+    constexpr uintptr_t kEffectiveShadowQuality             = 0x00D43154;
+    constexpr uintptr_t kShadowGroup                        = 0x00D43014;
+
+    // R5B2-D1 caster-path authority.
+    //
+    // When kShadowGroup is non-zero, the stock dispatcher resolves this
+    // shared engine texture as callback arg3 and passes the per-cascade
+    // resolved texture as callback arg4.  When kShadowGroup is zero the
+    // per-cascade texture itself is callback arg3 and arg4 is null.
+    constexpr uintptr_t kShadowCasterSharedResource         = 0x00D43250;
+
+    // R5B2-E1 synthetic single-cascade authority recovered from
+    // the native 0x00875F80 path.
+    //
+    // Constructor:
+    //   ECX = shadow object
+    //   no stack arguments
+    //   EAX = same object pointer on return.
+    //
+    // The constructor's final live fields are +0xA84/+0xA88, so an
+    // extension-owned object requires 0xA8C bytes.
+    constexpr uintptr_t kShadowObjectConstructor            = 0x008753F0;
+    constexpr size_t    kShadowObjectSize                   = 0x0A8C;
+
+    // Runtime callback slot and exact registered target.
+    constexpr uintptr_t kShadowCascadeBuildCallbackPtr      = 0x00D4315C;
+    constexpr uintptr_t kShadowCascadeBuildCallback         = 0x007BAFD0;
+
+    // Exact arg3 supplied by the stock synthetic path to D4315C.
+    constexpr uintptr_t kShadowSyntheticBuilderVector       = 0x00D43278;
+
+    // R5B2-F1 exact native synthetic continuation after D4315C:
+    //
+    //   ECX = syntheticObject + 0x6C
+    //   arg1 = syntheticObject + 0x24
+    //   call 0x00983990
+    constexpr uintptr_t kShadowSyntheticPostBuildHelper     = 0x00983990;
+    constexpr size_t    kShadowSyntheticPostBuildArgument   = 0x0024;
+
+    // Native synthetic context exported immediately after the helper.
+    //
+    // D43278..D43280 = {1,0,0}
+    // D43170..D4317C = syntheticObject + 0x900..0x90C
+    constexpr uintptr_t kShadowSyntheticCasterVector        = 0x00D43278;
+    constexpr uintptr_t kShadowSyntheticContextBase         = 0x00D43170;
+    constexpr size_t    kShadowSyntheticContextObjectBase   = 0x0900;
+    constexpr size_t    kShadowSyntheticContextCount        = 4;
+
+    // Stock synthetic path stores 3 into object+0 before D43160.
+    constexpr size_t    kShadowSyntheticMode                = 0x0000;
+
+    // Exact registered finalizer.
+    constexpr uintptr_t kShadowFinalizerCallbackPtr         = 0x00D43160;
+    constexpr uintptr_t kShadowFinalizerCallback            = 0x007BD200;
+
+    // The synthetic path supplies this byte as finalizer arg2 at Tier 5.
+    // Exact registered 0x7BD200 does not read arg2, but preserve the
+    // native calling contract.
+    constexpr uintptr_t kShadowGenerationByte               = 0x00D4316C;
+
+    // Native per-cascade shadow-resource records.
+    //
+    // R5A13 + R5B2-A5 prove exactly three records, stride 0x3C:
+    //
+    //   +0x00  resource handle A
+    //   +0x04  resource handle B
+    //   +0x08  cascade half-extent
+    //   +0x0C  squared recenter threshold
+    //   ...
+    //   +0x38  active A/B resource selector
+    //
+    // The selector is explicitly toggled to 0/1 by the native cascade
+    // updater. It is NOT a four-entry texture selector.
+    //
+    // At Tier 5, resource A is created and resource B is absent.  The three
+    // receiver paths load selector 0/1, index the corresponding first two
+    // dwords, pass the selected engine texture handle through kTexResolve,
+    // and give the resulting Gx texture object to kSetSamplerTexture.
+    //
+    // Record bases:
+    //   cascade 0 -> 0x00D43290
+    //   cascade 1 -> 0x00D432CC
+    //   cascade 2 -> 0x00D43308
+    //
+    // A hypothetical record 3 would begin at 0x00D43344 and collide with
+    // the live receiver constant block at 0x00D43348. Never extend it.
+    constexpr uintptr_t kShadowTextureRecordBase            = 0x00D43290;
+    constexpr size_t    kShadowTextureRecordStride          = 0x003C;
+
+    constexpr size_t kShadowTextureResourceA                = 0x00;
+    constexpr size_t kShadowTextureResourceB                = 0x04;
+    constexpr size_t kShadowCascadeExtent                   = 0x08;
+    constexpr size_t kShadowCascadeRecenterSq               = 0x0C;
+    constexpr size_t kShadowTextureSelector                 = 0x38;
+    constexpr size_t kShadowTextureResourceSlots            = 2;
+
+    // 0x874FB0 passes record+0x28 as callback arg5.
+    constexpr size_t kShadowCasterRecordArgument            = 0x28;
+
+    // Per-cascade dispatch gate inside the native shadow object:
+    // index 0 -> +0x0C, index 1 -> +0x10, index 2 -> +0x14.
+    constexpr size_t kShadowCascadeEnabledBase              = 0x0C;
+    constexpr size_t kShadowCascadeEnabledStride            = 0x04;
+
+    // Native caster callback 0x007BBC50 indexes one 0x24-byte state
+    // record per legal native cascade.  Its entry fast-path is taken
+    // only when these three fields are all zero.
+    constexpr uintptr_t kShadowCasterStateBase              = 0x00D25320;
+    constexpr size_t    kShadowCasterStateStride            = 0x24;
+    constexpr size_t    kShadowCasterWorkField0             = 0x00;
+    constexpr size_t    kShadowCasterWorkField10            = 0x10;
+    constexpr size_t    kShadowCasterWorkField1C            = 0x1C;
+
+    // Native texture-handle metadata written by 0x004B8C80.
+    //
+    // kTexResolve returns the engine Gx texture representation stored by the
+    // handle; it is not an IDirect3DTexture9 COM interface.
+    constexpr size_t kTextureHandleGxObject                 = 0x44;
+    constexpr size_t kTextureHandleCreateArg1               = 0x48;
+    constexpr size_t kTextureHandleWidth                    = 0x4C;
+    constexpr size_t kTextureHandleHeight                   = 0x4E;
+    constexpr size_t kTextureHandleCreateArg5               = 0x50;
+    constexpr size_t kTextureHandleCreateArg6               = 0x54;
+    // Historical symbol name retained for source stability.
+    // Static authority proves +0x58 stores the creator's transformed
+    // argument-7 value.  The accepted Tier-5 runtime value is 0x281;
+    // do not infer broader/public flag semantics from that value alone.
+    constexpr size_t kTextureHandleCreateFlags              = 0x58;
+
+    // Engine-managed texture-handle creation used directly by the stock
+    // shadow-resource initializer at 0x00875D30.
+    //
+    // R5B2-A5 statically proves an 11-argument __cdecl call.  At Tier 5,
+    // the per-cascade resource-A call is:
+    //
+    //   arg1  = 0
+    //   arg2  = shadow-map width
+    //   arg3  = shadow-map height
+    //   arg4  = 0
+    //   arg5  = native texture-format/class value
+    //   arg6  = native texture-format/class value
+    //   arg7  = native creator argument 7
+    //   arg8  = 0
+    //   arg9  = 0x005EEB70
+    //   arg10 = 0x009F0E58
+    //   arg11 = 0
+    //
+    // R5B2-A9 live proof establishes 2048x2048, arg5=arg6=0x0C,
+    // stored +0x58 value=0x281 on the accepted Tier-5 runtime. B1 copies those
+    // variable values from a live native cascade instead of hard-coding
+    // them, while preserving the exact remaining native call contract.
+    constexpr uintptr_t kCreateTextureHandle                = 0x004B8C80;
+    constexpr uintptr_t kShadowTextureCreateOpaqueArg9      = 0x005EEB70;
+    constexpr uintptr_t kShadowTextureCreateOpaqueArg10     = 0x009F0E58;
+
+    using Map_CreateTextureHandleFn =
+        void*(__cdecl*)(
+            uint32_t arg1,
+            uint32_t width,
+            uint32_t height,
+            uint32_t arg4,
+            uint32_t arg5,
+            uint32_t arg6,
+            uint32_t flags,
+            uint32_t arg8,
+            uintptr_t arg9,
+            uintptr_t arg10,
+            uint32_t arg11);
+
+    // Native shadow-object layout proven by R5A13.
+    constexpr size_t kShadowCascadeRecordBase               = 0x06C;
+    constexpr size_t kShadowCascadeRecordStride             = 0x0F4;
+
+    // Exact stock synthetic-object fields written before the legal
+    // slot-0 D4315C call at 0x0087611D.
+    constexpr size_t kShadowSyntheticExtent                 = 0x0958;
+
+    // Do not assign axis semantics beyond what the disassembly proves.
+    // Stock write order is {-extent,+extent,-extent,+extent}.
+    constexpr size_t kShadowSyntheticBound0                 = 0x0964;
+    constexpr size_t kShadowSyntheticBound1                 = 0x0968;
+    constexpr size_t kShadowSyntheticBound2                 = 0x096C;
+    constexpr size_t kShadowSyntheticBound3                 = 0x0970;
+
+    // Stock seed write order is {0,1,0,1}.
+    constexpr size_t kShadowSyntheticSeed0                  = 0x0994;
+    constexpr size_t kShadowSyntheticSeed1                  = 0x0998;
+    constexpr size_t kShadowSyntheticSeed2                  = 0x099C;
+    constexpr size_t kShadowSyntheticSeed3                  = 0x09A0;
+
+    constexpr size_t kShadowCascadeMatrixBase               = 0x09C4;
+    constexpr size_t kShadowCascadeMatrixStride             = 0x0040;
+
+    constexpr size_t kShadowActiveCascadeIndex              = 0x0A84;
+    constexpr size_t kShadowStateField                      = 0x0A88;
+
+    // Direct x86 thiscall constructor represented as fastcall so ECX
+    // receives the object and the dummy EDX consumes no stack argument.
+    using ShadowObjectConstructorFn =
+        void*(__fastcall*)(
+            void* shadowObject,
+            void* unusedEdx);
+
+    // Exact five-stack-argument D4315C contract, confirmed by both the
+    // normal cascade builder and native synthetic-object path:
+    //
+    //   arg1 = shadowObject + 0x6C + slot*0xF4
+    //   arg2 = shadowObject + 0x9C4 + slot*0x40
+    //   arg3 = builder/config pointer
+    //   arg4 = root shadow object
+    //   arg5 = legal native/internal slot
+    //
+    // E1 uses slot 0 only.
+    using ShadowCascadeBuildCallbackFn =
+        void(__cdecl*)(
+            void* cascadeRecord,
+            float* matrixDestination,
+            void* builderVector,
+            void* shadowObject,
+            int32_t builderSlot);
+
+    // 0x983990 is called as a one-argument thiscall:
+    //   ECX = synthetic slot-0 record
+    //   stack arg1 = syntheticObject + 0x24.
+    using ShadowSyntheticPostBuildFn =
+        void(__fastcall*)(
+            void* cascadeRecord,
+            void* unusedEdx,
+            void* objectArgument);
+
+    // Both recovered callers push two arguments and clean eight bytes.
+    // The registered 0x7BD200 body consumes arg1 at [EBP+8] as the
+    // shadow object and does not read arg2.
+    using ShadowFinalizerFn =
+        int32_t(__cdecl*)(
+            void* shadowObject,
+            int32_t generationToken);
+
+    using RenderShadowCascadesFn = void(__cdecl*)(void* shadowObject);
+
+    // Exact five-argument callback contract recovered from 0x874FB0.
+    //
+    // This type is valid only for legal native indices 0..2.  R5 must
+    // never invoke it with native index 3.
+    // Both recovered native return paths set EAX=1 before returning.
+    using ShadowCascadeRenderCallbackFn =
+        int32_t(__cdecl*)(
+            void* shadowObject,
+            int32_t cascadeIndex,
+            void* renderTexture,
+            void* destinationTexture,
+            void* recordArgument);
+
     // Texture layers, alpha maps and terrain shadow maps (render-chunk side)
     /// Teardown counterpart of the layer build -- release any extension-side per-layer resource exactly
     /// when the client does. __thiscall, caller-cleaned.

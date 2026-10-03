@@ -345,7 +345,10 @@ namespace wxl::offsets::engine::gx
         constexpr unsigned kGetTextureStageState   = 66;
         constexpr unsigned kSetTextureStageState   = 67;
         constexpr unsigned kSetSamplerState        = 69;
+        constexpr unsigned kDrawPrimitive          = 81;
+        constexpr unsigned kDrawIndexedPrimitive   = 82;
         constexpr unsigned kDrawPrimitiveUP        = 83;
+        constexpr unsigned kDrawIndexedPrimitiveUP = 84;
         constexpr unsigned kSetFVF                 = 89;
         constexpr unsigned kCreateVertexShader     = 91;
         constexpr unsigned kSetVertexShader        = 92;
@@ -359,7 +362,6 @@ namespace wxl::offsets::engine::gx
         constexpr unsigned kGetPixelShader         = 108;
         constexpr unsigned kSetPixelShaderConstantF = 109;
         constexpr unsigned kGetPixelShaderConstantF = 110;
-        constexpr unsigned kDrawIndexedPrimitive   = 0x148 / 4;
     }
 
     // Engine-internal shader-constant upload (the device's own constant path), addressed as a vtable

@@ -20,5 +20,5 @@ namespace wxl::features
 {
     /// In-game ImGui overlay, toggled with F9, hosting the tuning panels. It consumes input ONLY
     /// while it is open, so leaving it compiled in costs a hidden overlay and nothing else.
-    inline constexpr bool imguiOverlay = true;
+    inline constexpr bool imguiOverlay = false;
 }

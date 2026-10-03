@@ -1,0 +1,80 @@
+name: R6 Classic Water Asset Acquisition
+
+on:
+  push:
+    branches:
+      - gfx-r6-water-diagnostics
+    paths:
+      - '.github/workflows/r6-classic-water-acquire.yml'
+      - 'tools/r6-water-acquire/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  acquire:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout exact branch commit
+        uses: actions/checkout@v4
+      - name: Show authority
+        run: |
+          echo "commit=$GITHUB_SHA"
+          git status --short --branch
+      - name: Fetch and verify exact Classic 1.13.2 water shader objects
+        run: python3 tools/r6-water-acquire/fetch_classic_water.py
+      - name: Show acquisition summary
+        if: always()
+        run: cat r6-classic-water-acquire/SUMMARY.txt
+      - name: Resolve absent loose EKeys through pinned archive indices
+        run: python3 tools/r6-water-acquire/fetch_classic_water_archives.py
+      - name: Show archive fallback summary
+        if: always()
+        run: cat r6-classic-water-archive-fallback/ARCHIVE_FALLBACK_SUMMARY.txt
+      - name: Upload acquisition evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r6-classic-water-acquire-${{ github.sha }}
+          path: |
+            r6-classic-water-acquire/
+            r6-classic-water-archive-fallback/
+          if-no-files-found: error
+          retention-days: 14\n
+  disassemble:
+    needs: acquire
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout exact branch commit
+        uses: actions/checkout@v4
+      - name: Download CKey-verified acquisition evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: r6-classic-water-acquire-${{ github.sha }}
+          path: .
+      - name: Extract exact DXBC permutations from verified GXSH containers
+        run: python tools/r6-water-acquire/gxsh_extract_dxbc.py r6-classic-water-archive-fallback/decoded r6-classic-water-disassembly/dxbc
+      - name: Disassemble with Microsoft D3DCompiler 47
+        run: python tools/r6-water-acquire/disassemble_dxbc.py r6-classic-water-disassembly/dxbc
+      - name: Show exact Water family assembly headers
+        run: |
+          Get-Content r6-classic-water-disassembly/DXBC_SUMMARY.txt
+          Get-Content r6-classic-water-disassembly/DISASSEMBLY_SUMMARY.txt
+          Get-ChildItem r6-classic-water-disassembly/dxbc/shaders__pixel__ps_5_0__water -Filter *.asm | ForEach-Object {
+            Write-Host "===== $($_.Name) ====="
+            Get-Content $_.FullName -TotalCount 120
+          }
+          Get-ChildItem r6-classic-water-disassembly/dxbc/shaders__vertex__vs_5_0__water -Filter *.asm | ForEach-Object {
+            Write-Host "===== $($_.Name) ====="
+            Get-Content $_.FullName -TotalCount 120
+          }
+      - name: Upload exact Classic DXBC disassembly evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: r6-classic-water-disassembly-${{ github.sha }}
+          path: r6-classic-water-disassembly/
+          if-no-files-found: error
+          retention-days: 14

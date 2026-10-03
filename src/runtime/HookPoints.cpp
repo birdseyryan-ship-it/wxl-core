@@ -191,6 +191,8 @@ namespace wxl::runtime::hookpoints
             // --- liquid ------------------------------------------------------------------------------
             { "Liquid.MaterialWaterRender",                liq::kMaterialWaterRender },
             { "Liquid.MaterialWaterNoSpecRender",          liq::kMaterialWaterNoSpecRender },
+            { "Liquid.MaterialProcWaterRender",            liq::kMaterialProcWaterRender },
+            { "Liquid.MaterialMagmaRender",                liq::kMaterialMagmaRender },
             { "Liquid.MaterialBankGetMaterial",            liq::kMaterialBankGetMaterial },
             { "Liquid.ChunkGeomGetBuffers",                liq::kChunkGeomGetBuffers },
             { "Liquid.MeshGeomGetBuffers",                 liq::kMeshGeomGetBuffers },

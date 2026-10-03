@@ -1,0 +1,196 @@
+name: R8 Step11H A1B1R1 Perf Probe
+
+on:
+  push:
+    branches:
+      - 'r8-step11h-a1b1-perf-probe-*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  qualify-a1b1r1:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout exact candidate commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Show exact source authority
+        run: |
+          Write-Host "Commit: $env:GITHUB_SHA"
+
+          git status --short --branch
+
+          git log -1 `
+            --format="Commit: %H%nParent: %P%nTree: %T%nSubject: %s"
+
+          $parent = git show -s --format='%P' HEAD
+
+          if (
+            $parent -ne
+            "ab744c46f26b89d551e7a18352ca18eaef88a7e4"
+          ) {
+            throw "A1B1R1 parent authority mismatch: $parent"
+          }
+
+          git merge-base --is-ancestor `
+            "537790002f54ad54e84024fe2973f8bbcaff78e2" `
+            HEAD
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "A1B1R1 frozen integration base is not an ancestor"
+          }
+
+      - name: Run A1B1R1 source tests
+        run: |
+          python -m unittest discover `
+            -s tools/r8-step11-perf-check `
+            -p "test_perf_probe_source.py" `
+            -v
+
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Configure Win32
+        run: |
+          cmake -S . `
+            -B build-a1b1 `
+            -A Win32
+
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Build WarcraftXL only
+        run: |
+          cmake --build build-a1b1 `
+            --config Release `
+            --target WarcraftXL `
+            --parallel
+
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Verify package contains no protected binaries
+        run: |
+          New-Item `
+            -ItemType Directory `
+            -Force `
+            -Path dist-a1b1 |
+            Out-Null
+
+          Copy-Item `
+            "build-a1b1\Release\WarcraftXL.dll" `
+            "dist-a1b1\WarcraftXL.dll"
+
+          if (
+            (Test-Path "dist-a1b1\Wow.exe") -or
+            (Test-Path "dist-a1b1\d3d9.dll")
+          ) {
+            throw "Protected binary entered A1B1 package"
+          }
+
+      - name: Record source and binary authority
+        run: |
+          $dllHash = (
+            Get-FileHash `
+              -Algorithm SHA256 `
+              "dist-a1b1\WarcraftXL.dll"
+          ).Hash.ToLower()
+
+          "$dllHash  WarcraftXL.dll" |
+            Set-Content "dist-a1b1\SHA256SUMS.txt"
+
+          $tree = git show -s --format='%T' HEAD
+          $parent = git show -s --format='%P' HEAD
+
+          $authority = [ordered]@{
+            commit = "$env:GITHUB_SHA"
+            parent = "$parent"
+            tree = "$tree"
+
+            required_parent =
+              "ab744c46f26b89d551e7a18352ca18eaef88a7e4"
+
+            prior_failed_candidate =
+              "ab744c46f26b89d551e7a18352ca18eaef88a7e4"
+
+            required_frozen_integration_base =
+              "537790002f54ad54e84024fe2973f8bbcaff78e2"
+
+            required_tree_base =
+              "3d4df55ff91ff34b5ec0f917b379c4b5c45c6a90"
+
+            required_production_base =
+              "1f03309da4639771d74c8957c85bd9653069b7c4"
+
+            step = "R8_STEP11H_A1B1R1"
+
+            mode =
+              "default_off_cpu_timing_gpu_query_capability_and_runtime_activation_probe"
+
+            feature_flag =
+              "WXL_R8_PERF_PROBE=1"
+
+            activation_marker =
+              "wxl-r8-perf: activation"
+
+            first_frame_marker =
+              "wxl-r8-perf: frame_boundary_first"
+
+            default_off = $true
+
+            rendering_output_changed = $false
+
+            shader_substitution = $false
+            constant_mutation = $false
+            render_target_mutation_by_probe = $false
+
+            gpu_query_phase =
+              "CreateQuery_capability_only"
+
+            gpu_query_issue = $false
+            gpu_query_getdata = $false
+            gpu_query_wait = $false
+            gpu_query_flush = $false
+
+            cpu_clock =
+              "QueryPerformanceCounter"
+
+            cpu_summary_window_frames = 600
+            cpu_sample_capacity_per_region = 2048
+
+            measured_owners =
+              "CE_AO,SMAA,R6_water"
+
+            live_deployment = $false
+            live_qualified = $false
+          }
+
+          $authority |
+            ConvertTo-Json |
+            Set-Content "dist-a1b1\SOURCE_AUTHORITY.json"
+
+          Get-Content "dist-a1b1\SHA256SUMS.txt"
+          Get-Content "dist-a1b1\SOURCE_AUTHORITY.json"
+
+      - name: Upload A1B1R1 candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: r8-step11h-a1b1r1-perf-probe-${{ github.sha }}
+          path: |
+            dist-a1b1/WarcraftXL.dll
+            dist-a1b1/SHA256SUMS.txt
+            dist-a1b1/SOURCE_AUTHORITY.json
+          if-no-files-found: error
+          retention-days: 14

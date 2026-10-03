@@ -36,6 +36,9 @@ namespace wxl::offsets::engine::liquid
     // The no-specular sibling draw (vtable slot [2] of the no-spec water material class), used when
     // the video options disable water specular; same dispatch signature.
     constexpr uintptr_t kMaterialWaterNoSpecRender = 0x008A5900;
+    // R6 exact DEV binary: constructor/RTTI/vtable verified, same seven-argument dispatch.
+    constexpr uintptr_t kMaterialProcWaterRender = 0x008A48F0;
+    constexpr uintptr_t kMaterialMagmaRender = 0x008A6090;
 
     // Geometry-provider GetBuffers (vtable slot [2] targets): called by the draw AFTER the stock
     // shader/state binds and immediately before the vertex/index streams are set and the batch is

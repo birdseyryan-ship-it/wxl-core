@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.20)
+project(R6WaterCheck LANGUAGES CXX)
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+add_executable(R6WaterCheck WaterDiagCheck.cpp)
+target_compile_features(R6WaterCheck PRIVATE cxx_std_20)
+target_include_directories(R6WaterCheck PRIVATE ../../modules/wxl-modern-render/src)
+enable_testing()
+add_test(NAME R6WaterPolicy COMMAND R6WaterCheck)

@@ -117,19 +117,62 @@ namespace
      */
     void __fastcall hkWorldScene(void* worldFrame, void* edx)
     {
+        // R6 ordering proof: append-only event emitted at the true world-scene entry. With no
+        // subscriber this is inert; the water diagnostic uses it only while explicitly enabled.
+        if (ev::Any(ev::Event::OnWorldSceneBegin))
+        {
+            ev::WorldSceneBeginArgs begin{ gx::RawDevice() };
+            ev::Emit(ev::Event::OnWorldSceneBegin, &begin);
+        }
+
         // Taken before the pass, not after: the post-process passes run inside it and can leave a
         // surface of their own bound. A subscriber that depth-tests against whatever it finds bound
         // afterwards is testing against a surface the world never wrote to, which rejects all of its
         // geometry and reports nothing.
         IDirect3DSurface9* sceneDepth = nullptr;
-        if (IDirect3DDevice9* d = static_cast<IDirect3DDevice9*>(gx::RawDevice()))
+        D3DMATRIX sceneProjection = {};
+        D3DVIEWPORT9 sceneViewport = {};
+        bool sceneProjectionValid = false;
+        bool sceneViewportValid = false;
+
+        if (IDirect3DDevice9* d =
+                static_cast<IDirect3DDevice9*>(gx::RawDevice()))
+        {
             d->GetDepthStencilSurface(&sceneDepth);
+
+            sceneProjectionValid =
+                SUCCEEDED(
+                    d->GetTransform(
+                        D3DTS_PROJECTION,
+                        &sceneProjection));
+
+            sceneViewportValid =
+                SUCCEEDED(
+                    d->GetViewport(
+                        &sceneViewport));
+        }
 
         g_origWorldScene(worldFrame, edx);
 
         if (ev::Any(ev::Event::OnWorldSceneEnd))
         {
-            ev::WorldSceneEndArgs a{ gx::RawDevice(), sceneDepth };
+            ev::WorldSceneEndArgs a{
+                gx::RawDevice(),
+                sceneDepth,
+                sceneProjectionValid
+                    ? reinterpret_cast<const float*>(
+                          &sceneProjection)
+                    : nullptr,
+                sceneViewport.X,
+                sceneViewport.Y,
+                sceneViewport.Width,
+                sceneViewport.Height,
+                sceneViewport.MinZ,
+                sceneViewport.MaxZ,
+                sceneProjectionValid,
+                sceneViewportValid
+            };
+
             ev::Emit(ev::Event::OnWorldSceneEnd, &a);
         }
 
@@ -149,7 +192,13 @@ namespace
 
         g_origWorldFinalize(worldFrame);
 
-        ev::WorldRenderEndArgs a{ gx::RawDevice() };
+        ev::WorldRenderEndArgs a{
+            gx::RawDevice(),
+            nullptr,
+            1.0f,
+            nullptr,
+            nullptr
+        };
         ev::Emit(ev::Event::OnWorldRenderEnd, &a);
     }
 
@@ -262,3 +311,22 @@ namespace
 }
 
 WXL_REGISTER_FEATURE("render", true, Install)
+
+// GFX-R2: compatibility seam for wxl-modern-render.
+// Effects are not user-accessible in R2, therefore depth is never requested.
+// R3 replaces this no-op with the readable-world-depth implementation.
+namespace wxl::runtime::render
+{
+    void SetReadableDepthNeeded(bool needed)
+    {
+        (void)needed;
+    }
+
+    long EndSceneForPostProcess(void* device)
+    {
+        if (!device || !g_origEndScene)
+            return D3DERR_INVALIDCALL;
+
+        return g_origEndScene(device);
+    }
+}
