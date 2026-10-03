@@ -17,6 +17,7 @@
 // GPL-3.0-or-later.
 
 #include "client/CWorldScene/StructuralMaterialPolicy.hpp"
+#include "client/CWorldScene/WmoPerPixelCandidate.hpp"
 
 #include "common/Log.hpp"
 #include "engine/hook/Hook.hpp"
@@ -57,6 +58,7 @@ namespace wxl::r8::materials
             bool wmo = false;
             bool m2 = false;
             bool wmoSelectorProof = false;
+            bool wmoPerPixel = false;
         };
 
         Config g_config{};
@@ -130,6 +132,7 @@ namespace wxl::r8::materials
             bool wmoValid = true;
             bool m2Valid = true;
             bool selectorProofValid = true;
+            bool perPixelValid = true;
 
             out.master =
                 ReadBoolEnvironment(
@@ -151,11 +154,17 @@ namespace wxl::r8::materials
                     "WXL_R8_WMO_SELECTOR_PROOF",
                     selectorProofValid);
 
+            out.wmoPerPixel =
+                ReadBoolEnvironment(
+                    "WXL_R8_WMO_PERPIXEL",
+                    perPixelValid);
+
             out.valid =
                 masterValid &&
                 wmoValid &&
                 m2Valid &&
-                selectorProofValid;
+                selectorProofValid &&
+                perPixelValid;
 
             return out;
         }
@@ -592,8 +601,8 @@ namespace wxl::r8::materials
             if (!latch->exchange(true))
             {
                 WLOG_INFO(
-                    "r8-step11-material: WMO dry-run seam reached "
-                    "family=%s; substitution=OFF",
+                    "r8-step11-material: WMO candidate route reached "
+                    "family=%s",
                     WmoFamilyName(family));
             }
         }
@@ -630,6 +639,10 @@ namespace wxl::r8::materials
                 vtxIdx,
                 pixIdx);
 
+            // A completed native EffectBind supersedes any custom wrapper
+            // state left by the immediately preceding WMO draw.
+            NoteWmoPerPixelNativeBind();
+
             if (
                 !g_config.wmo ||
                 g_wmoRenderDepth == 0)
@@ -651,7 +664,14 @@ namespace wxl::r8::materials
                     pixIdx);
             }
 
-            // The original 11B-01 witness remains useful and unchanged.
+            if (g_config.wmoPerPixel)
+            {
+                TryBindWmoPerPixelCandidate(
+                    family,
+                    vtxIdx,
+                    pixIdx);
+            }
+
             LogFirstWmoCandidate(
                 family);
         }
@@ -673,6 +693,11 @@ namespace wxl::r8::materials
 
             ~WmoRenderScope()
             {
+                // If the final draw in this scope used the opt-in custom
+                // pair, hand GxState back to the native wrappers selected
+                // by that draw before leaving the WMO render boundary.
+                RestoreWmoPerPixelIfPending();
+
                 g_wmoRoot =
                     previousRoot;
 
@@ -810,10 +835,12 @@ namespace wxl::r8::materials
             WLOG_INFO(
                 "r8-step11-material: structural substrate enabled "
                 "master=1 wmo=%u m2=%u selector_proof=%u "
-                "mutation=0 gx-device-draw-owner=0",
+                "perpixel=%u mutation=%u gx-device-draw-owner=0",
                 g_config.wmo ? 1u : 0u,
                 g_config.m2 ? 1u : 0u,
-                g_config.wmoSelectorProof ? 1u : 0u);
+                g_config.wmoSelectorProof ? 1u : 0u,
+                g_config.wmoPerPixel ? 1u : 0u,
+                g_config.wmoPerPixel ? 1u : 0u);
 
             return true;
         }
