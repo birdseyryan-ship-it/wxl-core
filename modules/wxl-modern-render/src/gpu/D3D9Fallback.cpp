@@ -28,6 +28,7 @@
 #include <d3dcompiler.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 
@@ -188,6 +189,62 @@ namespace wxl::scripts::render_modern::d3d9fallback
             }();
 
             return enabled;
+        }
+
+
+        int AoRawScalePercent()
+        {
+            static const int percent = []()
+            {
+                // Preserve the historical compatibility switch exactly.
+                if (AoHalfResolutionFallbackEnabled())
+                    return 50;
+
+                char raw[16] = {};
+
+                const DWORD n =
+                    GetEnvironmentVariableA(
+                        "WXL_R8_AO_SCALE_PERCENT",
+                        raw,
+                        sizeof(raw));
+
+                if (n == 0 ||
+                    n >= sizeof(raw))
+                {
+                    return 100;
+                }
+
+                char* end = nullptr;
+
+                const long parsed =
+                    std::strtol(
+                        raw,
+                        &end,
+                        10);
+
+                if (!end ||
+                    *end != '\0')
+                {
+                    return 100;
+                }
+
+                switch (parsed)
+                {
+                case 50:
+                case 67:
+                case 70:
+                case 75:
+                case 80:
+                case 100:
+                    return static_cast<int>(
+                        parsed);
+
+                default:
+                    return 100;
+                }
+            }();
+
+            return percent;
         }
 
 
@@ -1612,22 +1669,33 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                 fullFmt == D3DFMT_UNKNOWN)
                 return false;
 
-            // R4B1-D Classic Enhanced production default:
-            // raw AO now runs at full output resolution. Controlled
-            // QA/compatibility comparisons can restore the historical
-            // half-resolution path with WXL_AO_HALF_RES=1.
-            const bool fullResAo =
-                !AoHalfResolutionFallbackEnabled();
+            // R4B1-D remains full-resolution by default.
+            //
+            // Step11H A3 adds an explicit, bounded raw-AO scale selector so
+            // performance/quality can be swept without changing the
+            // full-resolution bilateral composite, AO algorithm or tap count.
+            // The historical WXL_AO_HALF_RES switch remains an exact 50%
+            // compatibility alias.
+            const int aoScalePercent =
+                AoRawScalePercent();
 
             const UINT aoW =
-                fullResAo
-                    ? fullW
-                    : (fullW > 1 ? fullW / 2 : 1);
+                std::max<UINT>(
+                    1u,
+                    static_cast<UINT>(
+                        (static_cast<unsigned long long>(fullW) *
+                         static_cast<unsigned long long>(aoScalePercent) +
+                         50ull) /
+                        100ull));
 
             const UINT aoH =
-                fullResAo
-                    ? fullH
-                    : (fullH > 1 ? fullH / 2 : 1);
+                std::max<UINT>(
+                    1u,
+                    static_cast<UINT>(
+                        (static_cast<unsigned long long>(fullH) *
+                         static_cast<unsigned long long>(aoScalePercent) +
+                         50ull) /
+                        100ull));
 
             if (g_aoTexture &&
                 g_aoSurface &&
@@ -1744,13 +1812,14 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
 
             WLOG_INFO(
                 "wxl-modern-r4b1d: AO targets ready "
-                "raw=%ux%u composite=%ux%u fmt=%u resolution=%s",
+                "raw=%ux%u composite=%ux%u fmt=%u "
+                "raw_scale_percent=%d",
                 g_aoWidth,
                 g_aoHeight,
                 fullW,
                 fullH,
                 static_cast<unsigned>(fullFmt),
-                fullResAo ? "full" : "half");
+                aoScalePercent);
 
             return true;
         }

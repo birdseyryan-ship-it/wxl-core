@@ -69,19 +69,38 @@ class FastAoPreset2SourceTests(unittest.TestCase):
             self.src,
         )
 
-    def test_full_resolution_target_policy_is_unchanged(self):
+    def test_full_resolution_target_policy_defaults_to_100_percent(self):
         self.assertIn(
-            "const bool fullResAo =\n"
-            "                !AoHalfResolutionFallbackEnabled();",
+            "int AoRawScalePercent()",
             self.src,
+        )
+
+        self.assertIn(
+            "return 100;",
+            self.src,
+        )
+
+        target = self.src[
+            self.src.index("bool EnsureAoTarget("):
+            self.src.index(
+                "void RestoreDeviceState(",
+                self.src.index("bool EnsureAoTarget("),
+            )
+        ]
+
+        self.assertIn(
+            "const int aoScalePercent =",
+            target,
+        )
+
+        self.assertIn(
+            "AoRawScalePercent();",
+            target,
         )
 
         self.assertNotIn(
             "WXL_R8_AO_FAST_PRESET2",
-            self.src[
-                self.src.index("bool EnsureAoTarget("):
-                self.src.index("void RestoreDeviceState(", self.src.index("bool EnsureAoTarget("))
-            ],
+            target,
         )
 
     def test_fast_shader_keeps_twelve_tap_topology(self):
