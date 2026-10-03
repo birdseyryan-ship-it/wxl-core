@@ -1,4 +1,4 @@
-name: R8 Step11H A1B1 Perf Probe
+name: R8 Step11H A1B1R1 Perf Probe
 
 on:
   push:
@@ -14,7 +14,7 @@ defaults:
     shell: pwsh
 
 jobs:
-  qualify-a1b1:
+  qualify-a1b1r1:
     runs-on: windows-latest
 
     steps:
@@ -36,12 +36,20 @@ jobs:
 
           if (
             $parent -ne
-            "537790002f54ad54e84024fe2973f8bbcaff78e2"
+            "ab744c46f26b89d551e7a18352ca18eaef88a7e4"
           ) {
-            throw "A1B1 parent authority mismatch: $parent"
+            throw "A1B1R1 parent authority mismatch: $parent"
           }
 
-      - name: Run A1B1 source tests
+          git merge-base --is-ancestor `
+            "537790002f54ad54e84024fe2973f8bbcaff78e2" `
+            HEAD
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "A1B1R1 frozen integration base is not an ancestor"
+          }
+
+      - name: Run A1B1R1 source tests
         run: |
           python -m unittest discover `
             -s tools/r8-step11-perf-check `
@@ -112,6 +120,12 @@ jobs:
             tree = "$tree"
 
             required_parent =
+              "ab744c46f26b89d551e7a18352ca18eaef88a7e4"
+
+            prior_failed_candidate =
+              "ab744c46f26b89d551e7a18352ca18eaef88a7e4"
+
+            required_frozen_integration_base =
               "537790002f54ad54e84024fe2973f8bbcaff78e2"
 
             required_tree_base =
@@ -120,13 +134,19 @@ jobs:
             required_production_base =
               "1f03309da4639771d74c8957c85bd9653069b7c4"
 
-            step = "R8_STEP11H_A1B1"
+            step = "R8_STEP11H_A1B1R1"
 
             mode =
-              "default_off_cpu_timing_and_gpu_query_capability_probe"
+              "default_off_cpu_timing_gpu_query_capability_and_runtime_activation_probe"
 
             feature_flag =
               "WXL_R8_PERF_PROBE=1"
+
+            activation_marker =
+              "wxl-r8-perf: activation"
+
+            first_frame_marker =
+              "wxl-r8-perf: frame_boundary_first"
 
             default_off = $true
 
@@ -164,10 +184,10 @@ jobs:
           Get-Content "dist-a1b1\SHA256SUMS.txt"
           Get-Content "dist-a1b1\SOURCE_AUTHORITY.json"
 
-      - name: Upload A1B1 candidate
+      - name: Upload A1B1R1 candidate
         uses: actions/upload-artifact@v4
         with:
-          name: r8-step11h-a1b1-perf-probe-${{ github.sha }}
+          name: r8-step11h-a1b1r1-perf-probe-${{ github.sha }}
           path: |
             dist-a1b1/WarcraftXL.dll
             dist-a1b1/SHA256SUMS.txt

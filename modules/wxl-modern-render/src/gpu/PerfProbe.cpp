@@ -341,6 +341,38 @@ namespace wxl::scripts::render_modern::perf
     }
 
 
+    void ReportActivation() noexcept
+    {
+        static bool reported = false;
+
+        if (reported)
+            return;
+
+        reported = true;
+
+        char raw[16] = {};
+
+        const DWORD n =
+            GetEnvironmentVariableA(
+                "WXL_R8_PERF_PROBE",
+                raw,
+                sizeof(raw));
+
+        const bool present =
+            n > 0 &&
+            n < sizeof(raw);
+
+        WLOG_INFO(
+            "wxl-r8-perf: activation "
+            "env_present=%u env_len=%lu "
+            "raw=%s enabled=%u",
+            present ? 1u : 0u,
+            static_cast<unsigned long>(n),
+            present ? raw : "<unset>",
+            Enabled() ? 1u : 0u);
+    }
+
+
     std::uint64_t CpuBegin() noexcept
     {
         if (!Enabled() ||
@@ -513,6 +545,18 @@ namespace wxl::scripts::render_modern::perf
         g_lastSmaa = smaaActive;
 
         ++g_frameWindow;
+
+        if (g_frameWindow == 1)
+        {
+            WLOG_INFO(
+                "wxl-r8-perf: frame_boundary_first "
+                "resolution=%ux%u msaa=%u ao=%u smaa=%u",
+                g_lastWidth,
+                g_lastHeight,
+                g_lastMsaa,
+                g_lastAo ? 1u : 0u,
+                g_lastSmaa ? 1u : 0u);
+        }
 
         if (g_frameWindow >=
             kEmitEveryFrames)

@@ -1537,6 +1537,8 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
         if (!Available() || !device)
             return false;
 
+        perf::ReportActivation();
+
         perf::CpuScope framePerf(
             perf::CpuRegion::FallbackFrameTotal);
 

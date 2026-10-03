@@ -80,6 +80,46 @@ class PerfProbeSourceTests(unittest.TestCase):
             self.cpp,
         )
 
+    def test_runtime_activation_marker_precedes_gated_timing(self):
+        activation = "perf::ReportActivation();"
+        timing = "perf::CpuScope framePerf("
+
+        self.assertIn(
+            activation,
+            self.fallback,
+        )
+
+        self.assertIn(
+            timing,
+            self.fallback,
+        )
+
+        self.assertLess(
+            self.fallback.index(activation),
+            self.fallback.index(timing),
+        )
+
+    def test_activation_marker_records_runtime_environment(self):
+        expected = (
+            '"wxl-r8-perf: activation "',
+            '"WXL_R8_PERF_PROBE"',
+            '"env_present=%u env_len=%lu "',
+            '"raw=%s enabled=%u"',
+            "GetEnvironmentVariableA",
+        )
+
+        for token in expected:
+            self.assertIn(
+                token,
+                self.cpp,
+            )
+
+    def test_first_enabled_frame_boundary_is_observable(self):
+        self.assertIn(
+            '"wxl-r8-perf: frame_boundary_first "',
+            self.cpp,
+        )
+
     def test_qpc_is_cpu_clock(self):
         self.assertIn(
             "QueryPerformanceCounter",

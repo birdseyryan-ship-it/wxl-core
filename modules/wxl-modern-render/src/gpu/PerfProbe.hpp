@@ -41,6 +41,12 @@ namespace wxl::scripts::render_modern::perf
     // Default OFF. When disabled, no QPC call is issued from CpuBegin().
     bool Enabled() noexcept;
 
+    // Emits exactly one render-owner activation marker containing the raw
+    // process environment observation and the cached Enabled() decision.
+    // This is intentionally safe even when the probe is disabled so a live
+    // OFF/ON run can prove what the injected process actually received.
+    void ReportActivation() noexcept;
+
     // Returns zero when disabled or when the call is rejected by the
     // single-render-thread ownership gate.
     std::uint64_t CpuBegin() noexcept;
