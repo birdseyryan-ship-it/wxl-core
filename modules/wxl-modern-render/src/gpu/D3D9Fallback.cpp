@@ -60,6 +60,7 @@ namespace wxl::scripts::render_modern::d3d9fallback
         IDirect3DPixelShader9* g_proofShader = nullptr;
         IDirect3DPixelShader9* g_depthProofShader = nullptr;
         IDirect3DPixelShader9* g_aoProofShader = nullptr;
+        IDirect3DPixelShader9* g_aoFastProductionShader = nullptr;
         IDirect3DPixelShader9* g_aoDenoiseShader = nullptr;
         IDirect3DPixelShader9* g_fxaaShader[3] = { nullptr, nullptr, nullptr };
 
@@ -103,6 +104,7 @@ namespace wxl::scripts::render_modern::d3d9fallback
         bool g_loggedAoMode = false;
         bool g_loggedAoProjection = false;
         bool g_loggedAoProduction = false;
+        bool g_loggedAoFastProduction = false;
 
         struct FsVertex
         {
@@ -177,6 +179,35 @@ namespace wxl::scripts::render_modern::d3d9fallback
 
                 if (n == 0 || n >= sizeof(raw))
                     return false;
+
+                const char c = raw[0];
+
+                return c != '0' &&
+                       c != 'n' && c != 'N' &&
+                       c != 'f' && c != 'F';
+            }();
+
+            return enabled;
+        }
+
+
+        bool AoFastPreset2Enabled()
+        {
+            static const bool enabled = []()
+            {
+                char raw[16] = {};
+
+                const DWORD n =
+                    GetEnvironmentVariableA(
+                        "WXL_R8_AO_FAST_PRESET2",
+                        raw,
+                        sizeof(raw));
+
+                if (n == 0 ||
+                    n >= sizeof(raw))
+                {
+                    return false;
+                }
 
                 const char c = raw[0];
 
@@ -311,6 +342,7 @@ namespace wxl::scripts::render_modern::d3d9fallback
             SafeRelease(g_proofShader);
             SafeRelease(g_depthProofShader);
             SafeRelease(g_aoProofShader);
+            SafeRelease(g_aoFastProductionShader);
             SafeRelease(g_aoDenoiseShader);
 
             for (auto*& p : g_fxaaShader)
@@ -333,6 +365,7 @@ namespace wxl::scripts::render_modern::d3d9fallback
             g_loggedAoMode = false;
             g_loggedAoProjection = false;
             g_loggedAoProduction = false;
+            g_loggedAoFastProduction = false;
         }
 
         bool CompilePixelShader(IDirect3DDevice9* dev,
@@ -795,6 +828,264 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
 
             return true;
         }
+
+
+        bool EnsureAoFastProductionShader(
+            IDirect3DDevice9* dev)
+        {
+            if (g_aoFastProductionShader)
+                return true;
+
+            // R8 Step11H optimization candidate:
+            // same accepted production Preset-2 constants, same 12 depth
+            // samples, same full-resolution target and same output equation.
+            // The hot radial exponent is fixed at the accepted value 3.0 and
+            // evaluated algebraically instead of through dynamic pow().
+            static const char* kAoFastProductionPs = R"HLSL(
+sampler2D depthTex : register(s0);
+
+float4 rcpAo     : register(c0);
+float4 proj      : register(c1);
+float4 aoParams  : register(c2);
+float4 aoControl : register(c3);
+
+float linearZ(float d)
+{
+    float denom = d - proj.z;
+    float safeDenom =
+        abs(denom) > 1.0e-7 ? denom : -1.0e-7;
+
+    return max(proj.w / safeDenom, 0.0);
+}
+
+float3 viewPos(float2 uv, float d)
+{
+    float z = linearZ(d);
+
+    float2 n = uv * 2.0 - 1.0;
+    n.y = -n.y;
+
+    return float3(
+        n.x * z / proj.x,
+        n.y * z / proj.y,
+        z);
+}
+
+float hash12(float2 p)
+{
+    return frac(
+        sin(dot(p, float2(12.9898, 78.233))) *
+        43758.5453);
+}
+
+float2 rotate2(float2 v, float2 cs)
+{
+    return float2(
+        v.x * cs.x - v.y * cs.y,
+        v.x * cs.y + v.y * cs.x);
+}
+
+float aoSample(
+    float3 P,
+    float3 N,
+    float2 uv,
+    float2 direction,
+    float uvRadius,
+    float scale)
+{
+    float2 suv =
+        uv + direction * uvRadius * scale;
+
+    float sd =
+        tex2D(depthTex, suv).r;
+
+    if (sd >= 0.9995)
+        return 0.0;
+
+    float3 Q =
+        viewPos(suv, sd);
+
+    float3 V =
+        Q - P;
+
+    float dist =
+        length(V);
+
+    if (dist <= 1.0e-4 ||
+        dist >= 0.42)
+        return 0.0;
+
+    float dz =
+        abs(Q.z - P.z);
+
+    if (dz > 0.42 * 0.55)
+        return 0.0;
+
+    float hemi =
+        saturate(
+            (dot(N, V) - 0.022) /
+            max(dist, 1.0e-4));
+
+    float falloff =
+        saturate(
+            1.0 -
+            dist / 0.42);
+
+    // R3E3: explicit radial shaping. 2.0 exactly reproduces the
+    // R3E2 squared falloff; higher values progressively tighten AO
+    // around true contact regions without changing the sampling topology.
+    falloff =
+        max(falloff, 0.0001);
+
+    falloff =
+        falloff *
+        falloff *
+        falloff;
+
+    float depthConfidence =
+        saturate(
+            1.0 -
+            dz /
+            max(
+                0.42 * 0.55,
+                1.0e-4));
+
+    return
+        hemi *
+        falloff *
+        depthConfidence;
+}
+
+float horizonPair(
+    float3 P,
+    float3 N,
+    float2 uv,
+    float2 direction,
+    float uvRadius)
+{
+    float h0 =
+        aoSample(
+            P, N, uv,
+            direction,
+            uvRadius,
+            0.32);
+
+    float h1 =
+        aoSample(
+            P, N, uv,
+            direction,
+            uvRadius,
+            0.72);
+
+    return max(h0, h1);
+}
+
+float4 main(float2 uv : TEXCOORD0) : COLOR0
+{
+    float d =
+        tex2D(depthTex, uv).r;
+
+    if (d >= 0.9995)
+        return float4(1,1,1,1);
+
+    float3 P =
+        viewPos(uv, d);
+
+    float3 rawN =
+        cross(
+            ddx(P),
+            ddy(P));
+
+    float3 N =
+        rawN /
+        max(length(rawN), 1.0e-5);
+
+    if (dot(N, -P) < 0.0)
+        N = -N;
+
+    float uvRadius =
+        min(
+            0.5 *
+            0.42 *
+            proj.y /
+            max(P.z, 0.01),
+            0.026);
+
+    float2 pixel =
+        floor(
+            uv /
+            rcpAo.xy);
+
+    float angle =
+        hash12(pixel) *
+        6.28318530718;
+
+    float s;
+    float c;
+    sincos(angle, s, c);
+
+    float2 cs =
+        float2(c, s);
+
+    float2 d0 = cs;
+    float2 d1 = rotate2(float2( 0.5, 0.8660254), cs);
+    float2 d2 = rotate2(float2(-0.5, 0.8660254), cs);
+    float2 d3 = -d0;
+    float2 d4 = -d1;
+    float2 d5 = -d2;
+
+    float occ = 0.0;
+
+    occ += horizonPair(P, N, uv, d0, uvRadius);
+    occ += horizonPair(P, N, uv, d1, uvRadius);
+    occ += horizonPair(P, N, uv, d2, uvRadius);
+    occ += horizonPair(P, N, uv, d3, uvRadius);
+    occ += horizonPair(P, N, uv, d4, uvRadius);
+    occ += horizonPair(P, N, uv, d5, uvRadius);
+
+    occ /= 6.0;
+
+    float ao =
+        saturate(
+            1.0 -
+            occ * 1.58);
+
+    ao =
+        pow(
+            max(ao, 0.0001),
+            1.10);
+
+    float fade =
+        saturate(
+            (P.z - 18.0) /
+            37.0);
+
+    ao =
+        lerp(
+            ao,
+            1.0,
+            fade);
+
+    return float4(ao, ao, ao, 1.0);
+}
+)HLSL";
+
+            if (!CompilePixelShader(
+                    dev,
+                    kAoFastProductionPs,
+                    "R8 fast full-res AO Preset 2",
+                    &g_aoFastProductionShader))
+            {
+                return false;
+            }
+
+            WLOG_INFO(
+                "wxl-r8-opt: fast full-res AO Preset-2 shader ready "
+                "samples=12 resolution=full radial=cubic");
+
+            return true;
+        }
+
 
         bool EnsureAoDenoiseShader(IDirect3DDevice9* dev)
         {
@@ -1666,6 +1957,17 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                 "preset=2 chain-before-AA");
         }
 
+        if (productionAo &&
+            AoFastPreset2Enabled() &&
+            !g_loggedAoFastProduction)
+        {
+            g_loggedAoFastProduction = true;
+
+            WLOG_INFO(
+                "wxl-r8-opt: fast AO Preset-2 requested "
+                "full_resolution=1 samples=12");
+        }
+
         if (depthProof && !g_loggedDepthMode)
         {
             g_loggedDepthMode = true;
@@ -1700,6 +2002,10 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             !g_proofTint &&
             smaaEnabled;
 
+        const bool fastProductionAo =
+            productionAo &&
+            AoFastPreset2Enabled();
+
         IDirect3DPixelShader9* shader = nullptr;
 
         if (depthProof)
@@ -1711,11 +2017,23 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
         }
         else if (aoActive)
         {
-            if (!EnsureAoProofShader(device) ||
-                !EnsureAoDenoiseShader(device))
+            if (!EnsureAoDenoiseShader(device))
                 return false;
 
-            shader = g_aoProofShader;
+            if (fastProductionAo)
+            {
+                if (!EnsureAoFastProductionShader(device))
+                    return false;
+
+                shader = g_aoFastProductionShader;
+            }
+            else
+            {
+                if (!EnsureAoProofShader(device))
+                    return false;
+
+                shader = g_aoProofShader;
+            }
         }
         else if (g_proofTint)
         {
@@ -2283,7 +2601,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                 &aoVp);
 
             device->SetPixelShader(
-                g_aoProofShader);
+                shader);
 
             device->SetTexture(
                 0,
