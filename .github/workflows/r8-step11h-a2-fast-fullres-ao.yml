@@ -1,0 +1,235 @@
+name: R8 Step11H A2 Fast Full-Res AO
+
+on:
+  push:
+    branches:
+      - 'r8-step11h-a2-fast-fullres-ao-*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  qualify-a2:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout exact candidate commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Show exact source authority
+        run: |
+          Write-Host "Commit: $env:GITHUB_SHA"
+
+          git status --short --branch
+
+          git log -1 `
+            --format="Commit: %H%nParent: %P%nTree: %T%nSubject: %s"
+
+          $parent = git show -s --format='%P' HEAD
+
+          if (
+            $parent -ne
+            "5e8fafb44dc866371b2af167404616bcbe15f272"
+          ) {
+            throw "A2 parent authority mismatch: $parent"
+          }
+
+          git merge-base --is-ancestor `
+            "537790002f54ad54e84024fe2973f8bbcaff78e2" `
+            HEAD
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "A2 frozen integration base is not an ancestor"
+          }
+
+      - name: Run A1B1R1 source tests
+        run: |
+          python -m unittest discover `
+            -s tools/r8-step11-perf-check `
+            -p "test_perf_probe_source.py" `
+            -v
+
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Run A1B2 async GPU source tests
+        run: |
+          python -m unittest discover `
+            -s tools/r8-step11-perf-check `
+            -p "test_gpu_profiler_source.py" `
+            -v
+
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Run fast full-res AO source tests
+        run: |
+          python -m unittest discover `
+            -s tools/r8-step11-perf-check `
+            -p "test_ao_fast_preset2_source.py" `
+            -v
+
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Configure Win32
+        run: |
+          cmake -S . `
+            -B build-a2 `
+            -A Win32
+
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Build WarcraftXL only
+        run: |
+          cmake --build build-a2 `
+            --config Release `
+            --target WarcraftXL `
+            --parallel
+
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Verify built DLL embeds optimization markers
+        run: |
+          $dll =
+            "build-a2\Release\WarcraftXL.dll"
+
+          $bytes =
+            [System.IO.File]::ReadAllBytes($dll)
+
+          $ascii =
+            [System.Text.Encoding]::ASCII.GetString($bytes)
+
+          $markers = @(
+            "WXL_R8_AO_FAST_PRESET2",
+            "wxl-r8-opt: fast AO Preset-2 requested",
+            "wxl-r8-opt: fast full-res AO Preset-2 shader ready",
+            "wxl-r8-perf: gpu_async"
+          )
+
+          foreach ($marker in $markers) {
+            if (-not $ascii.Contains($marker)) {
+              throw "Built DLL missing marker: $marker"
+            }
+          }
+
+          Write-Host "A2_BINARY_MARKERS=PASS"
+
+      - name: Verify package contains no protected binaries
+        run: |
+          New-Item `
+            -ItemType Directory `
+            -Force `
+            -Path dist-a2 |
+            Out-Null
+
+          Copy-Item `
+            "build-a2\Release\WarcraftXL.dll" `
+            "dist-a2\WarcraftXL.dll"
+
+          if (
+            (Test-Path "dist-a2\Wow.exe") -or
+            (Test-Path "dist-a2\d3d9.dll")
+          ) {
+            throw "Protected binary entered A2 package"
+          }
+
+      - name: Record source and binary authority
+        run: |
+          $dllHash = (
+            Get-FileHash `
+              -Algorithm SHA256 `
+              "dist-a2\WarcraftXL.dll"
+          ).Hash.ToLower()
+
+          "$dllHash  WarcraftXL.dll" |
+            Set-Content "dist-a2\SHA256SUMS.txt"
+
+          $tree = git show -s --format='%T' HEAD
+          $parent = git show -s --format='%P' HEAD
+
+          $authority = [ordered]@{
+            commit = "$env:GITHUB_SHA"
+            parent = "$parent"
+            tree = "$tree"
+
+            required_parent =
+              "5e8fafb44dc866371b2af167404616bcbe15f272"
+
+            required_frozen_integration_base =
+              "537790002f54ad54e84024fe2973f8bbcaff78e2"
+
+            prior_profile_step =
+              "R8_STEP11H_A1B2R1"
+
+            prior_profile_evidence_zip_sha256 =
+              "59d3dcf3a0409b137fe896aa56c1a666820ac9ef742458901d12ba45f48a974e"
+
+            step = "R8_STEP11H_A2"
+
+            mode =
+              "default_off_full_resolution_preset2_ao_specialization"
+
+            feature_flag =
+              "WXL_R8_AO_FAST_PRESET2=1"
+
+            default_off = $true
+
+            raw_ao_resolution =
+              "unchanged_full_resolution"
+
+            raw_ao_sample_topology =
+              "unchanged_12_depth_taps"
+
+            accepted_preset =
+              "R3E3_Preset2"
+
+            accepted_constants =
+              "radius=0.42,intensity=1.58,bias=0.022,maxUv=0.026,power=1.10,fade=18..55,radial=3.0"
+
+            optimization =
+              "specialized_constants,cubic_radial_falloff,paired_sincos,opposite_direction_reuse"
+
+            diagnostic_ao_path_changed = $false
+            half_resolution_forced = $false
+            smaa_changed = $false
+            water_changed = $false
+
+            profiler_available =
+              "A1B2_async_gpu_ring"
+
+            live_deployment = $false
+            live_qualified = $false
+          }
+
+          $authority |
+            ConvertTo-Json |
+            Set-Content "dist-a2\SOURCE_AUTHORITY.json"
+
+          Get-Content "dist-a2\SHA256SUMS.txt"
+          Get-Content "dist-a2\SOURCE_AUTHORITY.json"
+
+      - name: Upload A2 candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: r8-step11h-a2-fast-fullres-ao-${{ github.sha }}
+          path: |
+            dist-a2/WarcraftXL.dll
+            dist-a2/SHA256SUMS.txt
+            dist-a2/SOURCE_AUTHORITY.json
+          if-no-files-found: error
+          retention-days: 14
