@@ -6,6 +6,7 @@
 #include "water/Slot3Shaders.hpp"
 #include "water/Slot3ShaderCompileOptions.hpp"
 #include "gpu/PerfProbe.hpp"
+#include "gpu/GpuPerfRing.hpp"
 #include <d3d9.h>
 #include <d3dcompiler.h>
 
@@ -476,15 +477,21 @@ DepthRuntime::Convert(
         ok = false;
     }
 
-    if (ok &&
-        FAILED(
-            device->DrawPrimitiveUP(
-                D3DPT_TRIANGLESTRIP,
-                2,
-                quad,
-                sizeof(Vertex))))
+    if (ok)
     {
-        ok = false;
+        perf::GpuFrameScope gpuFrame(
+            perf::GpuOwner::WaterLinear,
+            device);
+
+        if (FAILED(
+                device->DrawPrimitiveUP(
+                    D3DPT_TRIANGLESTRIP,
+                    2,
+                    quad,
+                    sizeof(Vertex))))
+        {
+            ok = false;
+        }
     }
 
     // Remove raw INTZ from the temporary sampler before restoring.
