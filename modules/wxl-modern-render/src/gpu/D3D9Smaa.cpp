@@ -14,6 +14,7 @@
 
 #include "gpu/D3D9Smaa.hpp"
 #include "gpu/PerfProbe.hpp"
+#include "gpu/GpuPerfRing.hpp"
 
 #include "common/Log.hpp"
 
@@ -825,6 +826,10 @@ float4 main(float2 texcoord : TEXCOORD0,
         perf::CpuScope totalPerf(
             perf::CpuRegion::SmaaTotal);
 
+        perf::GpuScope gpuTotalPerf(
+            perf::CpuRegion::SmaaTotal,
+            device);
+
         if (g_device != device)
         {
             ReleaseAll();
@@ -897,11 +902,20 @@ float4 main(float2 texcoord : TEXCOORD0,
         const auto edgeStart =
             perf::CpuBegin();
 
-        const HRESULT edgeDrawHr =
-            DrawFullscreen(
-                device,
-                width,
-                height);
+        HRESULT edgeDrawHr =
+            D3DERR_INVALIDCALL;
+
+        {
+            perf::GpuScope gpuEdge(
+                perf::CpuRegion::SmaaEdgeDraw,
+                device);
+
+            edgeDrawHr =
+                DrawFullscreen(
+                    device,
+                    width,
+                    height);
+        }
 
         perf::CpuEnd(
             perf::CpuRegion::SmaaEdgeDraw,
@@ -960,11 +974,20 @@ float4 main(float2 texcoord : TEXCOORD0,
         const auto blendStart =
             perf::CpuBegin();
 
-        const HRESULT blendDrawHr =
-            DrawFullscreen(
-                device,
-                width,
-                height);
+        HRESULT blendDrawHr =
+            D3DERR_INVALIDCALL;
+
+        {
+            perf::GpuScope gpuBlend(
+                perf::CpuRegion::SmaaBlendDraw,
+                device);
+
+            blendDrawHr =
+                DrawFullscreen(
+                    device,
+                    width,
+                    height);
+        }
 
         perf::CpuEnd(
             perf::CpuRegion::SmaaBlendDraw,
@@ -1008,11 +1031,20 @@ float4 main(float2 texcoord : TEXCOORD0,
         const auto neighborhoodStart =
             perf::CpuBegin();
 
-        const HRESULT neighborhoodDrawHr =
-            DrawFullscreen(
-                device,
-                width,
-                height);
+        HRESULT neighborhoodDrawHr =
+            D3DERR_INVALIDCALL;
+
+        {
+            perf::GpuScope gpuNeighborhood(
+                perf::CpuRegion::SmaaNeighborhoodDraw,
+                device);
+
+            neighborhoodDrawHr =
+                DrawFullscreen(
+                    device,
+                    width,
+                    height);
+        }
 
         perf::CpuEnd(
             perf::CpuRegion::SmaaNeighborhoodDraw,

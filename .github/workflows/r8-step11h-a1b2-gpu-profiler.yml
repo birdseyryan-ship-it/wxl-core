@@ -1,0 +1,224 @@
+name: R8 Step11H A1B2 Async GPU Profiler
+
+on:
+  push:
+    branches:
+      - 'r8-step11h-a1b2-async-gpu-profiler-*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  qualify-a1b2:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout exact candidate commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Show exact source authority
+        run: |
+          Write-Host "Commit: $env:GITHUB_SHA"
+
+          git status --short --branch
+
+          git log -1 `
+            --format="Commit: %H%nParent: %P%nTree: %T%nSubject: %s"
+
+          $parent = git show -s --format='%P' HEAD
+
+          if (
+            $parent -ne
+            "f43956429c7fc49c87e94223b144d3696b42562a"
+          ) {
+            throw "A1B2 parent authority mismatch: $parent"
+          }
+
+          git merge-base --is-ancestor `
+            "537790002f54ad54e84024fe2973f8bbcaff78e2" `
+            HEAD
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "A1B2 frozen integration base is not an ancestor"
+          }
+
+      - name: Run A1B1R1 source tests
+        run: |
+          python -m unittest discover `
+            -s tools/r8-step11-perf-check `
+            -p "test_perf_probe_source.py" `
+            -v
+
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Run A1B2 async GPU source tests
+        run: |
+          python -m unittest discover `
+            -s tools/r8-step11-perf-check `
+            -p "test_gpu_profiler_source.py" `
+            -v
+
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Configure Win32
+        run: |
+          cmake -S . `
+            -B build-a1b2 `
+            -A Win32
+
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Build WarcraftXL only
+        run: |
+          cmake --build build-a1b2 `
+            --config Release `
+            --target WarcraftXL `
+            --parallel
+
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Verify built DLL embeds profiler markers
+        run: |
+          $dll =
+            "build-a1b2\Release\WarcraftXL.dll"
+
+          $bytes =
+            [System.IO.File]::ReadAllBytes($dll)
+
+          $ascii =
+            [System.Text.Encoding]::ASCII.GetString($bytes)
+
+          $markers = @(
+            "wxl-r8-perf: activation",
+            "wxl-r8-perf: gpu_async",
+            "wxl-r8-perf: gpu_summary",
+            "wxl-r8-perf: gpu "
+          )
+
+          foreach ($marker in $markers) {
+            if (-not $ascii.Contains($marker)) {
+              throw "Built DLL missing marker: $marker"
+            }
+          }
+
+          Write-Host "A1B2_BINARY_MARKERS=PASS"
+
+      - name: Verify package contains no protected binaries
+        run: |
+          New-Item `
+            -ItemType Directory `
+            -Force `
+            -Path dist-a1b2 |
+            Out-Null
+
+          Copy-Item `
+            "build-a1b2\Release\WarcraftXL.dll" `
+            "dist-a1b2\WarcraftXL.dll"
+
+          if (
+            (Test-Path "dist-a1b2\Wow.exe") -or
+            (Test-Path "dist-a1b2\d3d9.dll")
+          ) {
+            throw "Protected binary entered A1B2 package"
+          }
+
+      - name: Record source and binary authority
+        run: |
+          $dllHash = (
+            Get-FileHash `
+              -Algorithm SHA256 `
+              "dist-a1b2\WarcraftXL.dll"
+          ).Hash.ToLower()
+
+          "$dllHash  WarcraftXL.dll" |
+            Set-Content "dist-a1b2\SHA256SUMS.txt"
+
+          $tree = git show -s --format='%T' HEAD
+          $parent = git show -s --format='%P' HEAD
+
+          $authority = [ordered]@{
+            commit = "$env:GITHUB_SHA"
+            parent = "$parent"
+            tree = "$tree"
+
+            required_parent =
+              "f43956429c7fc49c87e94223b144d3696b42562a"
+
+            required_frozen_integration_base =
+              "537790002f54ad54e84024fe2973f8bbcaff78e2"
+
+            prior_live_qualified_step =
+              "R8_STEP11H_A1B1R1"
+
+            prior_live_evidence_zip_sha256 =
+              "8d88955c6014d64318cf6d29131ceb3843b41a34c08c233889273a9cd8b37fbe"
+
+            step = "R8_STEP11H_A1B2"
+
+            mode =
+              "default_off_async_d3d9_gpu_timestamp_ring"
+
+            feature_flag =
+              "WXL_R8_PERF_PROBE=1"
+
+            default_off = $true
+
+            gpu_query_live_capability =
+              "timestamp=1,frequency=1,disjoint=1"
+
+            ring_size = 8
+            min_harvest_age_frames = 4
+            getdata_flags = 0
+
+            same_frame_getdata = $false
+            gpu_wait = $false
+            gpu_flush = $false
+            blocking_poll_loop = $false
+
+            rendering_output_changed = $false
+            shader_substitution = $false
+            constant_mutation = $false
+            render_target_mutation_by_profiler = $false
+
+            measured_owners =
+              "CE_AO,SMAA,R6_water_snapshot,R6_water_linear_depth"
+
+            measured_gpu_regions =
+              "fallback.frame.total,fallback.colour_resolve,fallback.depth_stage1,fallback.depth_stage2,ao.raw_draw,ao.composite_draw,smaa.total,smaa.edge_draw,smaa.blend_draw,smaa.neighborhood_draw,water.snapshot.total,water.colour_copy,water.depth_stage1,water.depth_stage2,water.linear_depth"
+
+            live_deployment = $false
+            live_qualified = $false
+          }
+
+          $authority |
+            ConvertTo-Json |
+            Set-Content "dist-a1b2\SOURCE_AUTHORITY.json"
+
+          Get-Content "dist-a1b2\SHA256SUMS.txt"
+          Get-Content "dist-a1b2\SOURCE_AUTHORITY.json"
+
+      - name: Upload A1B2 candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: r8-step11h-a1b2-async-gpu-profiler-${{ github.sha }}
+          path: |
+            dist-a1b2/WarcraftXL.dll
+            dist-a1b2/SHA256SUMS.txt
+            dist-a1b2/SOURCE_AUTHORITY.json
+          if-no-files-found: error
+          retention-days: 14

@@ -19,6 +19,7 @@
 #include "gpu/D3D9Smaa.hpp"
 #include "gpu/D3D9DepthProbe.hpp"
 #include "gpu/PerfProbe.hpp"
+#include "gpu/GpuPerfRing.hpp"
 
 #include "../../vendor/fxaa/Fxaa3_11_embed.hpp"
 
@@ -1520,6 +1521,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
 
     void PrepareForReset()
     {
+        perf::GpuReset();
         perf::Reset();
 
         if (Available())
@@ -1864,13 +1866,25 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             return false;
         }
 
+        perf::GpuFrameScope gpuFrame(
+            perf::GpuOwner::Fallback,
+            device);
+
         const auto colourResolveStart =
             perf::CpuBegin();
 
-        const HRESULT stretchHr = device->StretchRect(
-            backbuffer, nullptr,
-            g_sceneSurface, nullptr,
-            D3DTEXF_NONE);
+        HRESULT stretchHr = D3DERR_INVALIDCALL;
+
+        {
+            perf::GpuScope gpuColourResolve(
+                perf::CpuRegion::FallbackColourResolve,
+                device);
+
+            stretchHr = device->StretchRect(
+                backbuffer, nullptr,
+                g_sceneSurface, nullptr,
+                D3DTEXF_NONE);
+        }
 
         perf::CpuEnd(
             perf::CpuRegion::FallbackColourResolve,
@@ -1891,13 +1905,22 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                 const auto depthStage1Start =
                     perf::CpuBegin();
 
-                const HRESULT stage1 =
-                    device->StretchRect(
-                        depthSource,
-                        nullptr,
-                        g_depthPlainSurface,
-                        nullptr,
-                        D3DTEXF_NONE);
+                HRESULT stage1 =
+                    D3DERR_INVALIDCALL;
+
+                {
+                    perf::GpuScope gpuDepthStage1(
+                        perf::CpuRegion::FallbackDepthStage1,
+                        device);
+
+                    stage1 =
+                        device->StretchRect(
+                            depthSource,
+                            nullptr,
+                            g_depthPlainSurface,
+                            nullptr,
+                            D3DTEXF_NONE);
+                }
 
                 perf::CpuEnd(
                     perf::CpuRegion::FallbackDepthStage1,
@@ -1910,13 +1933,19 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                     const auto depthStage2Start =
                         perf::CpuBegin();
 
-                    stage2 =
-                        device->StretchRect(
-                            g_depthPlainSurface,
-                            nullptr,
-                            g_depthSurface,
-                            nullptr,
-                            D3DTEXF_NONE);
+                    {
+                        perf::GpuScope gpuDepthStage2(
+                            perf::CpuRegion::FallbackDepthStage2,
+                            device);
+
+                        stage2 =
+                            device->StretchRect(
+                                g_depthPlainSurface,
+                                nullptr,
+                                g_depthSurface,
+                                nullptr,
+                                D3DTEXF_NONE);
+                    }
 
                     perf::CpuEnd(
                         perf::CpuRegion::FallbackDepthStage2,
@@ -1943,13 +1972,19 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                 const auto directDepthStart =
                     perf::CpuBegin();
 
-                depthStretchHr =
-                    device->StretchRect(
-                        depthSource,
-                        nullptr,
-                        g_depthSurface,
-                        nullptr,
-                        D3DTEXF_NONE);
+                {
+                    perf::GpuScope gpuDepthDirect(
+                        perf::CpuRegion::FallbackDepthStage2,
+                        device);
+
+                    depthStretchHr =
+                        device->StretchRect(
+                            depthSource,
+                            nullptr,
+                            g_depthSurface,
+                            nullptr,
+                            D3DTEXF_NONE);
+                }
 
                 perf::CpuEnd(
                     perf::CpuRegion::FallbackDepthStage2,
@@ -2303,12 +2338,21 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             const auto aoRawStart =
                 perf::CpuBegin();
 
-            const HRESULT aoDrawHr =
-                device->DrawPrimitiveUP(
-                    D3DPT_TRIANGLESTRIP,
-                    2,
-                    aoQuad,
-                    sizeof(FsVertex));
+            HRESULT aoDrawHr =
+                D3DERR_INVALIDCALL;
+
+            {
+                perf::GpuScope gpuAoRaw(
+                    perf::CpuRegion::AoRawDraw,
+                    device);
+
+                aoDrawHr =
+                    device->DrawPrimitiveUP(
+                        D3DPT_TRIANGLESTRIP,
+                        2,
+                        aoQuad,
+                        sizeof(FsVertex));
+            }
 
             perf::CpuEnd(
                 perf::CpuRegion::AoRawDraw,
@@ -2462,12 +2506,21 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             const auto aoCompositeStart =
                 perf::CpuBegin();
 
-            const HRESULT denoiseDrawHr =
-                device->DrawPrimitiveUP(
-                    D3DPT_TRIANGLESTRIP,
-                    2,
-                    fullQuad,
-                    sizeof(FsVertex));
+            HRESULT denoiseDrawHr =
+                D3DERR_INVALIDCALL;
+
+            {
+                perf::GpuScope gpuAoComposite(
+                    perf::CpuRegion::AoCompositeDraw,
+                    device);
+
+                denoiseDrawHr =
+                    device->DrawPrimitiveUP(
+                        D3DPT_TRIANGLESTRIP,
+                        2,
+                        fullQuad,
+                        sizeof(FsVertex));
+            }
 
             perf::CpuEnd(
                 perf::CpuRegion::AoCompositeDraw,

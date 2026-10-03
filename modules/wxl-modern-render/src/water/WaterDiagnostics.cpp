@@ -6,6 +6,7 @@
 #include "water/Slot3WrathBridge.hpp"
 #include "water/Slot3SnapshotPolicy.hpp"
 #include "gpu/PerfProbe.hpp"
+#include "gpu/GpuPerfRing.hpp"
 #include <new>
 #include "client/CWorldScene/LiquidDiagnostics.hpp"
 #include "client/CWorldScene/RenderModernBridge.hpp"
@@ -1188,17 +1189,32 @@ void CopyPreWaterAfterEnd(const Probe& before,HRESULT endHr,bool depth,
                          HRESULT& colour,HRESULT& depth1,HRESULT& depth2,HRESULT& begin) noexcept {
     if(SUCCEEDED(endHr)) {
         const auto colourStart=perf::CpuBegin();
-        colour=device->StretchRect(before.rt.p,nullptr,snapshotSurface,nullptr,D3DTEXF_NONE);
+        {
+            perf::GpuScope gpuColour(
+                perf::CpuRegion::WaterColourCopy,
+                device);
+            colour=device->StretchRect(before.rt.p,nullptr,snapshotSurface,nullptr,D3DTEXF_NONE);
+        }
         perf::CpuEnd(perf::CpuRegion::WaterColourCopy,colourStart);
 
         if(depth) {
             const auto depth1Start=perf::CpuBegin();
-            depth1=device->StretchRect(before.ds.p,nullptr,snapshotDepthPlainSurface,nullptr,D3DTEXF_NONE);
+            {
+                perf::GpuScope gpuDepth1(
+                    perf::CpuRegion::WaterDepthStage1,
+                    device);
+                depth1=device->StretchRect(before.ds.p,nullptr,snapshotDepthPlainSurface,nullptr,D3DTEXF_NONE);
+            }
             perf::CpuEnd(perf::CpuRegion::WaterDepthStage1,depth1Start);
 
             if(SUCCEEDED(depth1)) {
                 const auto depth2Start=perf::CpuBegin();
-                depth2=device->StretchRect(snapshotDepthPlainSurface,nullptr,snapshotDepthSurface,nullptr,D3DTEXF_NONE);
+                {
+                    perf::GpuScope gpuDepth2(
+                        perf::CpuRegion::WaterDepthStage2,
+                        device);
+                    depth2=device->StretchRect(snapshotDepthPlainSurface,nullptr,snapshotDepthSurface,nullptr,D3DTEXF_NONE);
+                }
                 perf::CpuEnd(perf::CpuRegion::WaterDepthStage2,depth2Start);
             }
         }
@@ -1233,7 +1249,12 @@ void ProductionSnapshotAtWater() noexcept {
     perf::CpuEnd(perf::CpuRegion::WaterEndScene,endStart);
 
     HRESULT copy=D3DERR_INVALIDCALL,depth1=D3DERR_INVALIDCALL,depth2=D3DERR_INVALIDCALL,begin=D3DERR_INVALIDCALL;
-    CopyPreWaterAfterEnd(before,end,true,copy,depth1,depth2,begin);
+    {
+        perf::GpuFrameScope gpuFrame(
+            perf::GpuOwner::WaterSnapshot,
+            SUCCEEDED(end) ? device : nullptr);
+        CopyPreWaterAfterEnd(before,end,true,copy,depth1,depth2,begin);
+    }
     Probe after;bool preserved=false;
     if(SUCCEEDED(begin)) {FillProbe(device,after);preserved=SameProbe(before,after);}
     snapshotValid=SUCCEEDED(end)&&SUCCEEDED(copy)&&SUCCEEDED(begin)&&preserved;
