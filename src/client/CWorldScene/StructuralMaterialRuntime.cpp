@@ -18,6 +18,7 @@
 
 #include "client/CWorldScene/StructuralMaterialPolicy.hpp"
 #include "client/CWorldScene/WmoPerPixelCandidate.hpp"
+#include "client/CWorldScene/WmoC28Proof.hpp"
 
 #include "common/Log.hpp"
 #include "engine/hook/Hook.hpp"
@@ -59,6 +60,7 @@ namespace wxl::r8::materials
             bool m2 = false;
             bool wmoSelectorProof = false;
             bool wmoPerPixel = false;
+            bool wmoC28Proof = false;
         };
 
         Config g_config{};
@@ -133,6 +135,7 @@ namespace wxl::r8::materials
             bool m2Valid = true;
             bool selectorProofValid = true;
             bool perPixelValid = true;
+            bool c28ProofValid = true;
 
             out.master =
                 ReadBoolEnvironment(
@@ -159,12 +162,20 @@ namespace wxl::r8::materials
                     "WXL_R8_WMO_PERPIXEL",
                     perPixelValid);
 
+            out.wmoC28Proof =
+                ReadBoolEnvironment("WXL_R8_WMO_C28_PROOF", c28ProofValid);
+
+            const bool proofCompatible = c28::Compatible(
+                out.wmoC28Proof, out.master, out.wmo, out.m2, out.wmoPerPixel);
+            if (!proofCompatible)
+                WLOG_WARN("r8-step11-c28: proof requires master=1 wmo=1 m2=0 perpixel=0; no structural hooks installed");
+
             out.valid =
                 masterValid &&
                 wmoValid &&
                 m2Valid &&
                 selectorProofValid &&
-                perPixelValid;
+                perPixelValid && c28ProofValid && proofCompatible;
 
             return out;
         }
@@ -576,6 +587,31 @@ namespace wxl::r8::materials
                 selectedPsHash.c_str());
         }
 
+        void LogWmoC28Proof(WmoFamily family, std::uint32_t vtxIdx, std::uint32_t pixIdx)
+        {
+            // Slot filter is only a cheap prefilter. Full fresh bytecode hashes
+            // and SM3 version checks must all succeed before any observation.
+            if (!c28::Slots(family, vtxIdx, pixIdx)) return;
+            try
+            {
+                std::uint32_t active = 0;
+                if (!ReadClientValue(sh::kActiveCollection, active) || !active) return;
+                const auto vs = SnapshotCollectionWrapper(active, sh::kCollectionVtxSlots, vtxIdx, 90);
+                const auto raw = SnapshotCollectionWrapper(active, sh::kCollectionVtxSlots, vtxIdx & ~1u, 90);
+                const auto ps = SnapshotCollectionWrapper(active, sh::kCollectionPixSlots, pixIdx, 16);
+                if (!vs.valid || !raw.valid || !ps.valid || vs.version != 0xfffe0300u ||
+                    raw.version != 0xfffe0300u || ps.version != 0xffff0300u) return;
+                const auto vsHash = SnapshotHash(vs), rawHash = SnapshotHash(raw), psHash = SnapshotHash(ps);
+                ObserveWmoC28Bind(family, CurrentWmoPath().c_str(), vtxIdx, pixIdx, active,
+                                 vsHash.c_str(), rawHash.c_str(), psHash.c_str());
+            }
+            catch (...)
+            {
+                InvalidateWmoC28Proof();
+                WLOG_ERROR("r8-step11-c28: {\"event\":\"identity_exception\"}");
+            }
+        }
+
         void LogFirstWmoCandidate(WmoFamily family)
         {
             std::atomic<bool>* latch = nullptr;
@@ -633,6 +669,8 @@ namespace wxl::r8::materials
             std::uint32_t vtxIdx,
             std::uint32_t pixIdx)
         {
+            if (g_config.wmoC28Proof) InvalidateWmoC28Proof();
+
             // The native binder also advances fog/alpha state. Preserve all of
             // that first; any eventual Step-11 substitution belongs after it.
             g_origWmoEffectBind(
@@ -664,6 +702,9 @@ namespace wxl::r8::materials
                     pixIdx);
             }
 
+            if (g_config.wmoC28Proof)
+                LogWmoC28Proof(family, vtxIdx, pixIdx);
+
             if (g_config.wmoPerPixel)
             {
                 TryBindWmoPerPixelCandidate(
@@ -684,6 +725,8 @@ namespace wxl::r8::materials
                 void* root)
                 : previousRoot(g_wmoRoot)
             {
+                if (g_config.wmoC28Proof)
+                    EnterWmoC28ProofScope(reinterpret_cast<std::uintptr_t>(root));
                 ++g_wmoRenderDepth;
 
                 g_wmoRoot =
@@ -693,6 +736,7 @@ namespace wxl::r8::materials
 
             ~WmoRenderScope()
             {
+                if (g_config.wmoC28Proof) LeaveWmoC28ProofScope();
                 // If the final draw in this scope used the opt-in custom
                 // pair, hand GxState back to the native wrappers selected
                 // by that draw before leaving the WMO render boundary.
@@ -831,6 +875,8 @@ namespace wxl::r8::materials
 
                 return false;
             }
+
+            if (g_config.wmoC28Proof) InitializeWmoC28Proof();
 
             WLOG_INFO(
                 "r8-step11-material: structural substrate enabled "

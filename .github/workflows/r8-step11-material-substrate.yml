@@ -1,9 +1,9 @@
-name: R8 Step11 WMO PerPixel Candidate
+name: R8 Step11B02B2A Read-Only C28 Proof
 
 on:
   push:
     branches:
-      - 'r8-step11-integration-*'
+      - 'r8-step11b02b2a-*'
   workflow_dispatch:
 
 permissions:
@@ -14,7 +14,7 @@ defaults:
     shell: pwsh
 
 jobs:
-  qualify-step11b02b1:
+  qualify-step11b02b2a:
     runs-on: windows-latest
 
     steps:
@@ -26,6 +26,8 @@ jobs:
       - name: Show exact source authority
         run: |
           Write-Host "Commit: $env:GITHUB_SHA"
+          git merge-base --is-ancestor 537790002f54ad54e84024fe2973f8bbcaff78e2 HEAD
+          if ($LASTEXITCODE -ne 0) { throw "Required B1 authority is not an ancestor" }
           git status --short --branch
           git log -1 --format="Commit: %H%nParent: %P%nTree: %T%nSubject: %s"
 
@@ -33,16 +35,25 @@ jobs:
         run: |
           python -m unittest discover `
             -s tools/r8-step11-material-check `
-            -p "test_structural_material_source.py" `
+            -p "test_*.py" `
             -v
 
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
           }
 
+      - name: Build and execute isolated read-only proof checks
+        run: |
+          cmake -S tools/r8-step11-material-check -B build-c28-check -A Win32
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build build-c28-check --config Release --parallel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ctest --test-dir build-c28-check -C Release -V --output-on-failure
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Configure Win32
         run: |
-          cmake -S . -B build-step11 -A Win32
+          cmake -S . -B build-step11 -A Win32 -DCLIENT_PATH=
 
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
@@ -92,44 +103,50 @@ jobs:
             commit = "$env:GITHUB_SHA"
             parent = "$parent"
             tree = "$tree"
-            required_parent = "ed58835770ccadbb5fedd70e6840b30f572edba7"
+            required_start_commit = "537790002f54ad54e84024fe2973f8bbcaff78e2"
+            required_start_tree = "3d4df55ff91ff34b5ec0f917b379c4b5c45c6a90"
             required_base = "1f03309da4639771d74c8957c85bd9653069b7c4"
-            step = "R8_STEP11B02B1"
-            mode = "opt_in_simple_directional_per_pixel"
+            step = "R8_STEP11B02B2A"
+            mode = "read_only_udiffuse_constant_bridge_proof"
+            feature_flag = "WXL_R8_WMO_C28_PROOF=1"
             default_off = $true
-            wmo_only = $true
+            shader_substitution = $false
+            constant_mutation = $false
+            gx_device_draw_owner = $false
             m2_changed = $false
+            live_deployment = $false
+            live_qualified = $false
+            b1_source_unchanged = $true
+            b1_perpixel_in_proof_mode = $false
             families = "Diffuse,Opaque"
-            selected_vs_contract = "exact_simple_MapObjDiffuse_T1_hashes_only"
+            selected_vs_contract = "exact_simple_MapObjUDiffuse_T1_hashes_only"
             raw_vs_contract = "exact_even_sibling_hash"
             pixel_contract = "exact_family_and_pix_hash"
             pixel_slots = "5,7"
-            pix15 = "stock_fallback"
-            udiffuse = "stock_fallback"
-            local_light_vs = "stock_fallback"
-            specular = "stock_fallback"
-            unknown_routes = "stock_fallback"
-            direct_setshader = $false
-            gxstate_substitution = $true
-            gx_device_draw_owner = $false
-            native_texture_sampling = "preserved"
-            native_shadow_program = "preserved"
-            native_fog_program = "preserved"
-            native_alpha_program = "preserved"
-            device_reset_qualification = "not_yet_performed"
+            observation_seams = "post_native_EffectBind,pre_D3D9_draw_chain,post_D3D9_draw_chain"
+            observed_constants = "VS c10,c11,c12,c28,c29; PS c31; native caches and dirty ranges"
+            local_lights_and_pix15 = "unobserved_stock"
+            tests = "43 Python tests; C28CoreCheck; actual production C28RuntimeCheck with fake COM/Win32"
+            run_id = "$env:GITHUB_RUN_ID"
+            run_attempt = "$env:GITHUB_RUN_ATTEMPT"
+            warcraftxl_sha256 = "$dllHash"
           }
 
           $authority |
             ConvertTo-Json |
             Set-Content "dist-step11\SOURCE_AUTHORITY.json"
 
+          $authorityHash = (Get-FileHash -Algorithm SHA256 "dist-step11\SOURCE_AUTHORITY.json").Hash.ToLower()
+          "$authorityHash  SOURCE_AUTHORITY.json" | Add-Content "dist-step11\SHA256SUMS.txt"
+          $names = @(Get-ChildItem "dist-step11" -File | Select-Object -ExpandProperty Name | Sort-Object)
+          if (($names -join ',') -ne 'SHA256SUMS.txt,SOURCE_AUTHORITY.json,WarcraftXL.dll') { throw "Unexpected package contents" }
           Get-Content "dist-step11\SHA256SUMS.txt"
           Get-Content "dist-step11\SOURCE_AUTHORITY.json"
 
-      - name: Upload Step11B02B1 candidate
+      - name: Upload Step11B02B2A read-only candidate
         uses: actions/upload-artifact@v4
         with:
-          name: r8-step11b02b1-wmo-perpixel-${{ github.sha }}
+          name: r8-step11b02b2a-c28-proof-${{ github.sha }}
           path: |
             dist-step11/WarcraftXL.dll
             dist-step11/SHA256SUMS.txt
