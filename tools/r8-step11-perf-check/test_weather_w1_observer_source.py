@@ -7,7 +7,7 @@ SRC = SRC_PATH.read_text(encoding="utf-8")
 CMAKE = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
 CONFIG = (ROOT / "src/config.hpp").read_text(encoding="utf-8")
 
-class WeatherW1ObserverSourceTests(unittest.TestCase):
+class WeatherW1R4ObserverSourceTests(unittest.TestCase):
     def test_default_off_opt_in_gate_exists(self):
         self.assertIn('"WXL_R8_WEATHER_DIAG"', SRC)
         self.assertIn('if (!g_config.enabled)', SRC)
@@ -21,7 +21,7 @@ class WeatherW1ObserverSourceTests(unittest.TestCase):
         self.assertIn("VerifyCanonicalExecutable()", SRC)
         self.assertIn("Wow.exe authority mismatch", SRC)
 
-    def test_transmorpher_weather_landmarks_are_observer_only(self):
+    def test_transmorpher_weather_landmarks_remain_observer_only(self):
         for marker in (
             "0x00CD7544",
             "0x007846A0",
@@ -30,7 +30,6 @@ class WeatherW1ObserverSourceTests(unittest.TestCase):
             "0x00526A96",
         ):
             self.assertIn(marker, SRC)
-        self.assertIn("kSmsWeatherPath", SRC)
         self.assertIn("landmark only; W1 does not hook packet parsing", SRC)
 
     def test_weather_hooks_forward_native_calls(self):
@@ -40,18 +39,33 @@ class WeatherW1ObserverSourceTests(unittest.TestCase):
         )
         self.assertIn("g_origClear(self, edx);", SRC)
 
-    def test_draw_observer_forwards_exactly_once_and_does_not_draw(self):
-        self.assertEqual(
-            SRC.count("g_origGxDeviceDraw(device, edx, batch, indexed);"),
-            1,
+    def test_direct_d3d_slots_are_observed(self):
+        required = (
+            "gxoff::vt::kDrawPrimitive",
+            "gxoff::vt::kDrawIndexedPrimitive",
+            "gxoff::vt::kDrawPrimitiveUP",
+            "gxoff::vt::kDrawIndexedPrimitiveUP",
+            "R8WeatherW1D3DDrawPrimitiveObserver",
+            "R8WeatherW1D3DDrawIndexedPrimitiveObserver",
+            "R8WeatherW1D3DDrawPrimitiveUPObserver",
+            "R8WeatherW1D3DDrawIndexedPrimitiveUPObserver",
         )
-        self.assertNotIn("DrawPrimitive(", SRC)
-        self.assertNotIn("DrawIndexedPrimitive(", SRC)
-        self.assertNotIn("DrawPrimitiveUP(", SRC)
-        self.assertNotIn("DrawIndexedPrimitiveUP(", SRC)
+        for token in required:
+            self.assertIn(token, SRC)
+        self.assertNotIn("R8WeatherW1GxDrawObserver", SRC)
 
-    def test_observer_is_read_only_for_d3d_state(self):
+    def test_each_direct_detour_forwards_to_native_original(self):
+        self.assertEqual(SRC.count("g_origDrawPrimitive("), 1)
+        self.assertEqual(SRC.count("g_origDrawIndexedPrimitive("), 1)
+        self.assertEqual(SRC.count("g_origDrawPrimitiveUP("), 1)
+        self.assertEqual(SRC.count("g_origDrawIndexedPrimitiveUP("), 1)
+
+    def test_observer_does_not_issue_its_own_draw_or_state_mutation(self):
         forbidden = (
+            "d->DrawPrimitive(",
+            "d->DrawIndexedPrimitive(",
+            "d->DrawPrimitiveUP(",
+            "d->DrawIndexedPrimitiveUP(",
             "->SetRenderState(",
             "->SetTexture(",
             "->SetPixelShader(",
@@ -63,33 +77,50 @@ class WeatherW1ObserverSourceTests(unittest.TestCase):
         for token in forbidden:
             self.assertNotIn(token, SRC)
 
-    def test_precipitation_candidate_filter_is_bounded(self):
+    def test_candidate_filter_matches_world_space_transparent_discovery(self):
+        self.assertIn('"WXL_R8_WEATHER_DIAG_MIN_PRIMS"', SRC)
+        self.assertIn("D3DRS_ZENABLE", SRC)
+        self.assertIn("D3DRS_ZWRITEENABLE", SRC)
+        self.assertIn("D3DRS_ALPHABLENDENABLE", SRC)
+        self.assertIn("D3DUSAGE_RENDERTARGET", SRC)
+        self.assertIn("key.zWrite != FALSE", SRC)
+        self.assertIn("key.alphaBlend == FALSE", SRC)
+        self.assertIn("primitiveCount < g_config.minPrimitives", SRC)
+
+    def test_output_is_aggregated_by_weather_segment(self):
+        self.assertIn("FlushDirectCandidates", SRC)
+        self.assertIn('FlushDirectCandidates("before_weather_set_type")', SRC)
+        self.assertIn('FlushDirectCandidates("before_weather_clear")', SRC)
+        self.assertIn('FlushDirectCandidates("periodic_900_frames")', SRC)
+        self.assertIn('\\"event\\":\\"direct_draw_aggregate\\"', SRC)
+        self.assertIn("std::vector<DirectCandidateStats>", SRC)
+
+    def test_precipitation_capture_is_bounded(self):
         self.assertIn("kDefaultMaxDrawRecords = 8192", SRC)
         self.assertIn("kHardMaxDrawRecords = 32768", SRC)
         self.assertIn("kMaxOutputBytes = 24u * 1024u * 1024u", SRC)
-        self.assertIn("D3DRS_ALPHABLENDENABLE", SRC)
-        self.assertIn("D3DRS_ALPHATESTENABLE", SRC)
-        self.assertIn('"world_scene"', SRC)
-        self.assertIn('"liquid"', SRC)
+        self.assertIn("2048u", SRC)
+        self.assertIn("g_drawRecords >= g_config.maxDrawRecords", SRC)
 
-    def test_required_fingerprint_fields_exist(self):
+    def test_required_aggregate_fingerprint_fields_exist(self):
         required = (
+            '\\"draw_kind\\"',
             '\\"prim_type\\"',
-            '\\"start_index\\"',
-            '\\"index_count\\"',
+            '\\"calls\\"',
+            '\\"total_primitives\\"',
+            '\\"min_primitives\\"',
+            '\\"max_primitives\\"',
+            '\\"texture\\"',
             '\\"vs_sha256\\"',
             '\\"ps_sha256\\"',
             '\\"vertex_decl_sha256\\"',
             '\\"stream0_stride\\"',
-            '\\"textures\\"',
             '\\"render_state\\"',
             '\\"sampler0\\"',
-            '\\"viewport\\"',
-            '\\"rt0\\"',
-            '\\"depth\\"',
             '\\"weather_rec_id\\"',
             '\\"requested_intensity\\"',
-            '\\"phase\\"',
+            '\\"first_phase\\"',
+            '\\"last_phase\\"',
         )
         for token in required:
             self.assertIn(token, SRC)

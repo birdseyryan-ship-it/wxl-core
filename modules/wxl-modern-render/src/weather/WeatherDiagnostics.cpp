@@ -21,6 +21,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -82,12 +83,107 @@ struct Config
     bool enabled = false;
     bool allDraws = false;
     uint32_t maxDrawRecords = kDefaultMaxDrawRecords;
+    uint32_t minPrimitives = 16;
 };
 
 struct ShaderCacheEntry
 {
     IUnknown* object = nullptr;
     std::string sha256;
+};
+
+enum class DirectDrawKind : uint32_t
+{
+    Primitive = 1,
+    IndexedPrimitive = 2,
+    PrimitiveUP = 3,
+    IndexedPrimitiveUP = 4
+};
+
+using DrawPrimitiveFn =
+    HRESULT (STDMETHODCALLTYPE*)(IDirect3DDevice9*, D3DPRIMITIVETYPE, UINT, UINT);
+using DrawIndexedPrimitiveFn =
+    HRESULT (STDMETHODCALLTYPE*)(IDirect3DDevice9*, D3DPRIMITIVETYPE, INT, UINT, UINT, UINT, UINT);
+using DrawPrimitiveUPFn =
+    HRESULT (STDMETHODCALLTYPE*)(IDirect3DDevice9*, D3DPRIMITIVETYPE, UINT, const void*, UINT);
+using DrawIndexedPrimitiveUPFn =
+    HRESULT (STDMETHODCALLTYPE*)(IDirect3DDevice9*, D3DPRIMITIVETYPE, UINT, UINT, UINT,
+                                 const void*, D3DFORMAT, const void*, UINT);
+
+struct DirectCandidateKey
+{
+    DirectDrawKind kind{};
+    D3DPRIMITIVETYPE primitiveType{};
+    IDirect3DBaseTexture9* texture = nullptr;
+    IDirect3DVertexShader9* vs = nullptr;
+    IDirect3DPixelShader9* ps = nullptr;
+    UINT width = 0;
+    UINT height = 0;
+    D3DFORMAT format = D3DFMT_UNKNOWN;
+    UINT stride = 0;
+    DWORD zEnable = 0;
+    DWORD zWrite = 0;
+    DWORD zFunc = 0;
+    DWORD alphaBlend = 0;
+    DWORD srcBlend = 0;
+    DWORD dstBlend = 0;
+    DWORD blendOp = 0;
+    DWORD alphaTest = 0;
+    DWORD alphaRef = 0;
+    DWORD alphaFunc = 0;
+    DWORD cull = 0;
+    DWORD colorWrite = 0;
+};
+
+bool SameKey(const DirectCandidateKey& a, const DirectCandidateKey& b)
+{
+    return a.kind == b.kind &&
+           a.primitiveType == b.primitiveType &&
+           a.texture == b.texture &&
+           a.vs == b.vs &&
+           a.ps == b.ps &&
+           a.width == b.width &&
+           a.height == b.height &&
+           a.format == b.format &&
+           a.stride == b.stride &&
+           a.zEnable == b.zEnable &&
+           a.zWrite == b.zWrite &&
+           a.zFunc == b.zFunc &&
+           a.alphaBlend == b.alphaBlend &&
+           a.srcBlend == b.srcBlend &&
+           a.dstBlend == b.dstBlend &&
+           a.blendOp == b.blendOp &&
+           a.alphaTest == b.alphaTest &&
+           a.alphaRef == b.alphaRef &&
+           a.alphaFunc == b.alphaFunc &&
+           a.cull == b.cull &&
+           a.colorWrite == b.colorWrite;
+}
+
+struct DirectCandidateStats
+{
+    DirectCandidateKey key{};
+    uint64_t calls = 0;
+    uint64_t totalPrimitives = 0;
+    uint32_t minPrimitives = std::numeric_limits<uint32_t>::max();
+    uint32_t maxPrimitives = 0;
+    uint64_t firstFrame = 0;
+    uint64_t lastFrame = 0;
+    uint64_t firstOrdinal = 0;
+    uint32_t textureLevels = 0;
+    DWORD textureUsage = 0;
+    D3DPOOL texturePool = D3DPOOL_DEFAULT;
+    DWORD fvf = 0;
+    DWORD samplerAddressU = 0;
+    DWORD samplerAddressV = 0;
+    DWORD samplerMag = 0;
+    DWORD samplerMin = 0;
+    DWORD samplerMip = 0;
+    std::string firstPhase;
+    std::string lastPhase;
+    std::string vsSha;
+    std::string psSha;
+    std::string declSha;
 };
 
 Config g_config{};
@@ -103,8 +199,15 @@ uint64_t g_weatherEvents = 0;
 const char* g_phase = "startup";
 WeatherSetTypeFn g_origSetType = nullptr;
 WeatherClearFn g_origClear = nullptr;
-gxoff::GxDeviceDrawFn g_origGxDeviceDraw = nullptr;
+DrawPrimitiveFn g_origDrawPrimitive = nullptr;
+DrawIndexedPrimitiveFn g_origDrawIndexedPrimitive = nullptr;
+DrawPrimitiveUPFn g_origDrawPrimitiveUP = nullptr;
+DrawIndexedPrimitiveUPFn g_origDrawIndexedPrimitiveUP = nullptr;
+void* g_directDrawTargets[4] = {};
 std::vector<ShaderCacheEntry> g_shaderCache;
+std::vector<DirectCandidateStats> g_directCandidates;
+
+void FlushDirectCandidates(const char* reason);
 
 bool TruthyEnv(const char* name)
 {
@@ -346,6 +449,8 @@ void __fastcall hkWeatherSetType(
     int abrupt,
     float transition)
 {
+    FlushDirectCandidates("before_weather_set_type");
+
     WeatherRecSnapshot rec{};
     SafeWeatherRec(weatherRec, rec);
 
@@ -369,6 +474,8 @@ void __fastcall hkWeatherSetType(
 
 void __fastcall hkWeatherClear(void* self, void* edx)
 {
+    FlushDirectCandidates("before_weather_clear");
+
     ++g_weather.epoch;
     g_weather.requestedType = 0;
     g_weather.requestedIntensity = 0.0f;
@@ -533,171 +640,347 @@ DWORD GetSs(IDirect3DDevice9* d, DWORD sampler, D3DSAMPLERSTATETYPE state)
     return value;
 }
 
-bool CandidateDraw(IDirect3DDevice9* d)
+const char* DrawKindName(DirectDrawKind kind)
 {
-    if (g_config.allDraws)
-        return true;
-
-    if (std::strcmp(g_phase, "world_scene") != 0 &&
-        std::strcmp(g_phase, "liquid") != 0)
-        return false;
-
-    const DWORD z = GetRs(d, D3DRS_ZENABLE);
-    const DWORD alphaBlend = GetRs(d, D3DRS_ALPHABLENDENABLE);
-    const DWORD alphaTest = GetRs(d, D3DRS_ALPHATESTENABLE);
-    const DWORD colour = GetRs(d, D3DRS_COLORWRITEENABLE);
-
-    return z != FALSE &&
-           colour != 0 &&
-           (alphaBlend != FALSE || alphaTest != FALSE);
+    switch (kind)
+    {
+    case DirectDrawKind::Primitive: return "DrawPrimitive";
+    case DirectDrawKind::IndexedPrimitive: return "DrawIndexedPrimitive";
+    case DirectDrawKind::PrimitiveUP: return "DrawPrimitiveUP";
+    case DirectDrawKind::IndexedPrimitiveUP: return "DrawIndexedPrimitiveUP";
+    default: return "unknown";
+    }
 }
 
-void ObserveGxDraw(void* device, uint32_t* batch, int indexed)
+UINT CurrentStreamStride(IDirect3DDevice9* d)
 {
-    if (!device || !batch)
-        return;
+    IDirect3DVertexBuffer9* vb = nullptr;
+    UINT offset = 0;
+    UINT stride = 0;
+    if (SUCCEEDED(d->GetStreamSource(0, &vb, &offset, &stride)) && vb)
+        vb->Release();
+    return stride;
+}
 
-    IDirect3DDevice9* d =
-        static_cast<IDirect3DDevice9*>(gx::RawDevice());
+bool PlausibleDirectWeatherDraw(
+    IDirect3DDevice9* d,
+    UINT primitiveCount,
+    DirectCandidateKey& key)
+{
+    if (!d)
+        return false;
 
-    if (!d || !CandidateDraw(d))
+    if (!g_config.allDraws && primitiveCount < g_config.minPrimitives)
+        return false;
+
+    key.zEnable = GetRs(d, D3DRS_ZENABLE);
+    key.zWrite = GetRs(d, D3DRS_ZWRITEENABLE);
+    key.zFunc = GetRs(d, D3DRS_ZFUNC);
+    key.alphaBlend = GetRs(d, D3DRS_ALPHABLENDENABLE);
+    key.srcBlend = GetRs(d, D3DRS_SRCBLEND);
+    key.dstBlend = GetRs(d, D3DRS_DESTBLEND);
+    key.blendOp = GetRs(d, D3DRS_BLENDOP);
+    key.alphaTest = GetRs(d, D3DRS_ALPHATESTENABLE);
+    key.alphaRef = GetRs(d, D3DRS_ALPHAREF);
+    key.alphaFunc = GetRs(d, D3DRS_ALPHAFUNC);
+    key.cull = GetRs(d, D3DRS_CULLMODE);
+    key.colorWrite = GetRs(d, D3DRS_COLORWRITEENABLE);
+
+    if (!g_config.allDraws)
+    {
+        // Native precipitation in the strongest donor evidence is world-space,
+        // depth-tested, alpha-blended, and does not write depth.  This is only
+        // a discovery filter: exact stock-12340 texture/shader signatures are
+        // still learned from this observer rather than copied from Ascension.
+        if (key.zEnable == FALSE ||
+            key.zWrite != FALSE ||
+            key.alphaBlend == FALSE ||
+            key.colorWrite == 0)
+            return false;
+    }
+
+    IDirect3DBaseTexture9* base = nullptr;
+    if (FAILED(d->GetTexture(0, &base)) || !base)
+        return false;
+
+    if (base->GetType() != D3DRTYPE_TEXTURE)
+    {
+        base->Release();
+        return false;
+    }
+
+    D3DSURFACE_DESC desc{};
+    auto* texture = static_cast<IDirect3DTexture9*>(base);
+    const HRESULT hr = texture->GetLevelDesc(0, &desc);
+    if (FAILED(hr) || (desc.Usage & D3DUSAGE_RENDERTARGET))
+    {
+        base->Release();
+        return false;
+    }
+
+    key.texture = base; // temporary AddRef held until ObserveDirectDraw finishes.
+    key.width = desc.Width;
+    key.height = desc.Height;
+    key.format = desc.Format;
+    return true;
+}
+
+void ObserveDirectDraw(
+    IDirect3DDevice9* d,
+    DirectDrawKind kind,
+    D3DPRIMITIVETYPE primitiveType,
+    UINT primitiveCount,
+    UINT explicitStride)
+{
+    ++g_drawOrdinal;
+
+    DirectCandidateKey key{};
+    key.kind = kind;
+    key.primitiveType = primitiveType;
+    key.stride = explicitStride ? explicitStride : CurrentStreamStride(d);
+
+    if (!PlausibleDirectWeatherDraw(d, primitiveCount, key))
         return;
 
     ++g_candidateDraws;
-
-    if (g_drawRecords >= g_config.maxDrawRecords)
-        return;
 
     IDirect3DVertexShader9* vs = nullptr;
     IDirect3DPixelShader9* ps = nullptr;
     d->GetVertexShader(&vs);
     d->GetPixelShader(&ps);
+    key.vs = vs;
+    key.ps = ps;
 
-    IDirect3DBaseTexture9* tex[4] = {};
-    for (DWORD stage = 0; stage < 4; ++stage)
-        d->GetTexture(stage, &tex[stage]);
-
-    IDirect3DSurface9* rt = nullptr;
-    IDirect3DSurface9* ds = nullptr;
-    d->GetRenderTarget(0, &rt);
-    d->GetDepthStencilSurface(&ds);
-
-    IDirect3DVertexBuffer9* vb = nullptr;
-    UINT vbOffset = 0;
-    UINT stride = 0;
-    d->GetStreamSource(0, &vb, &vbOffset, &stride);
-
-    DWORD fvf = 0;
-    d->GetFVF(&fvf);
-
-    D3DVIEWPORT9 vp{};
-    const HRESULT vpHr = d->GetViewport(&vp);
-
-    const std::string vsSha = ShaderSha(vs, true);
-    const std::string psSha = ShaderSha(ps, false);
-    const std::string declSha = VertexDeclSha(d);
-
-    std::string s = "{";
-    s += "\"schema\":1";
-    s += ",\"event\":\"draw\"";
-    s += ",\"frame\":" + std::to_string(g_frame);
-    s += ",\"draw_ordinal\":" + std::to_string(g_drawOrdinal);
-    s += ",\"weather_epoch\":" + std::to_string(g_weather.epoch);
-    s += ",\"phase\":" + hash::Quote(g_phase);
-    s += ",\"indexed\":" + std::string(indexed ? "true" : "false");
-    s += ",\"prim_type\":" + std::to_string(batch[gxoff::kGxBatchPrimType / 4]);
-    s += ",\"start_index\":" + std::to_string(batch[gxoff::kGxBatchStartIndex / 4]);
-    s += ",\"index_count\":" + std::to_string(batch[gxoff::kGxBatchIndexCount / 4]);
-
-    const uint16_t* minMax =
-        reinterpret_cast<const uint16_t*>(
-            reinterpret_cast<const uint8_t*>(batch) +
-            gxoff::kGxBatchMinIndex);
-
-    s += ",\"min_index\":" + std::to_string(minMax[0]);
-    s += ",\"max_index\":" + std::to_string(minMax[1]);
-    s += ",\"requested_type\":" + std::to_string(g_weather.requestedType);
-    s += ",\"requested_intensity\":" + std::to_string(g_weather.requestedIntensity);
-    s += ",\"weather_rec_id\":" + std::to_string(g_weather.rec.valid ? g_weather.rec.id : -1);
-    s += ",\"observed_get_type\":" + std::to_string(g_weather.observedGetType);
-    s += ",\"vs_sha256\":" + hash::Quote(vsSha);
-    s += ",\"ps_sha256\":" + hash::Quote(psSha);
-    s += ",\"vertex_decl_sha256\":" + hash::Quote(declSha);
-    s += ",\"fvf\":" + std::to_string(fvf);
-    s += ",\"stream0_offset\":" + std::to_string(vbOffset);
-    s += ",\"stream0_stride\":" + std::to_string(stride);
-
-    s += ",\"textures\":[";
-    for (unsigned i = 0; i < 4; ++i)
+    DirectCandidateStats* hit = nullptr;
+    for (auto& candidate : g_directCandidates)
     {
-        if (i) s += ",";
-        s += TextureJson(tex[i]);
-    }
-    s += "]";
-
-    s += ",\"render_state\":{";
-    s += "\"zenable\":" + std::to_string(GetRs(d, D3DRS_ZENABLE));
-    s += ",\"zwrite\":" + std::to_string(GetRs(d, D3DRS_ZWRITEENABLE));
-    s += ",\"zfunc\":" + std::to_string(GetRs(d, D3DRS_ZFUNC));
-    s += ",\"alpha_blend\":" + std::to_string(GetRs(d, D3DRS_ALPHABLENDENABLE));
-    s += ",\"src_blend\":" + std::to_string(GetRs(d, D3DRS_SRCBLEND));
-    s += ",\"dst_blend\":" + std::to_string(GetRs(d, D3DRS_DESTBLEND));
-    s += ",\"blend_op\":" + std::to_string(GetRs(d, D3DRS_BLENDOP));
-    s += ",\"alpha_test\":" + std::to_string(GetRs(d, D3DRS_ALPHATESTENABLE));
-    s += ",\"alpha_ref\":" + std::to_string(GetRs(d, D3DRS_ALPHAREF));
-    s += ",\"alpha_func\":" + std::to_string(GetRs(d, D3DRS_ALPHAFUNC));
-    s += ",\"cull\":" + std::to_string(GetRs(d, D3DRS_CULLMODE));
-    s += ",\"color_write\":" + std::to_string(GetRs(d, D3DRS_COLORWRITEENABLE));
-    s += ",\"fog_enable\":" + std::to_string(GetRs(d, D3DRS_FOGENABLE));
-    s += "}";
-
-    s += ",\"sampler0\":{";
-    s += "\"address_u\":" + std::to_string(GetSs(d, 0, D3DSAMP_ADDRESSU));
-    s += ",\"address_v\":" + std::to_string(GetSs(d, 0, D3DSAMP_ADDRESSV));
-    s += ",\"mag_filter\":" + std::to_string(GetSs(d, 0, D3DSAMP_MAGFILTER));
-    s += ",\"min_filter\":" + std::to_string(GetSs(d, 0, D3DSAMP_MINFILTER));
-    s += ",\"mip_filter\":" + std::to_string(GetSs(d, 0, D3DSAMP_MIPFILTER));
-    s += "}";
-
-    s += ",\"viewport_hr\":" + std::to_string(static_cast<int32_t>(vpHr));
-    if (SUCCEEDED(vpHr))
-    {
-        s += ",\"viewport\":{";
-        s += "\"x\":" + std::to_string(vp.X);
-        s += ",\"y\":" + std::to_string(vp.Y);
-        s += ",\"width\":" + std::to_string(vp.Width);
-        s += ",\"height\":" + std::to_string(vp.Height);
-        s += ",\"min_z\":" + std::to_string(vp.MinZ);
-        s += ",\"max_z\":" + std::to_string(vp.MaxZ);
-        s += "}";
+        if (SameKey(candidate.key, key))
+        {
+            hit = &candidate;
+            break;
+        }
     }
 
-    s += ",\"rt0\":" + SurfaceJson(rt);
-    s += ",\"depth\":" + SurfaceJson(ds);
-    s += "}";
+    if (!hit)
+    {
+        const size_t hardUniqueLimit =
+            static_cast<size_t>(std::min<uint32_t>(g_config.maxDrawRecords, 2048u));
 
-    EmitLine(std::move(s));
-    ++g_drawRecords;
+        if (g_directCandidates.size() >= hardUniqueLimit)
+        {
+            ++g_dropped;
+        }
+        else
+        {
+            DirectCandidateStats fresh{};
+            fresh.key = key;
+            fresh.firstFrame = g_frame;
+            fresh.lastFrame = g_frame;
+            fresh.firstOrdinal = g_drawOrdinal;
+            fresh.textureLevels = key.texture ? key.texture->GetLevelCount() : 0;
+            fresh.textureUsage = 0;
+            fresh.texturePool = D3DPOOL_DEFAULT;
 
-    if (vb) vb->Release();
-    if (rt) rt->Release();
-    if (ds) ds->Release();
-    for (auto*& t : tex) if (t) t->Release();
-    if (vs) vs->Release();
-    if (ps) ps->Release();
+            if (key.texture && key.texture->GetType() == D3DRTYPE_TEXTURE)
+            {
+                D3DSURFACE_DESC desc{};
+                if (SUCCEEDED(
+                        static_cast<IDirect3DTexture9*>(key.texture)->GetLevelDesc(0, &desc)))
+                {
+                    fresh.textureUsage = desc.Usage;
+                    fresh.texturePool = desc.Pool;
+                }
+            }
+
+            d->GetFVF(&fresh.fvf);
+            fresh.samplerAddressU = GetSs(d, 0, D3DSAMP_ADDRESSU);
+            fresh.samplerAddressV = GetSs(d, 0, D3DSAMP_ADDRESSV);
+            fresh.samplerMag = GetSs(d, 0, D3DSAMP_MAGFILTER);
+            fresh.samplerMin = GetSs(d, 0, D3DSAMP_MINFILTER);
+            fresh.samplerMip = GetSs(d, 0, D3DSAMP_MIPFILTER);
+            fresh.firstPhase = g_phase ? g_phase : "";
+            fresh.lastPhase = fresh.firstPhase;
+            fresh.vsSha = ShaderSha(vs, true);
+            fresh.psSha = ShaderSha(ps, false);
+            fresh.declSha = VertexDeclSha(d);
+
+            // Candidate keys keep raw object identity only for this segment;
+            // no additional COM reference is required because the engine owns
+            // these resources throughout their draws.
+            g_directCandidates.push_back(std::move(fresh));
+            hit = &g_directCandidates.back();
+        }
+    }
+
+    if (hit)
+    {
+        ++hit->calls;
+        hit->totalPrimitives += primitiveCount;
+        hit->minPrimitives = std::min(hit->minPrimitives, primitiveCount);
+        hit->maxPrimitives = std::max(hit->maxPrimitives, primitiveCount);
+        hit->lastFrame = g_frame;
+        hit->lastPhase = g_phase ? g_phase : "";
+    }
+
+    if (key.texture)
+        key.texture->Release();
+    if (vs)
+        vs->Release();
+    if (ps)
+        ps->Release();
 }
 
-void __fastcall hkGxDeviceDraw(
-    void* device,
-    void* edx,
-    uint32_t* batch,
-    int indexed)
+void FlushDirectCandidates(const char* reason)
 {
-    ++g_drawOrdinal;
-    ObserveGxDraw(device, batch, indexed);
+    if (g_directCandidates.empty())
+        return;
 
-    if (g_origGxDeviceDraw)
-        g_origGxDeviceDraw(device, edx, batch, indexed);
+    for (const auto& c : g_directCandidates)
+    {
+        if (g_drawRecords >= g_config.maxDrawRecords)
+        {
+            ++g_dropped;
+            break;
+        }
+
+        std::string s = "{";
+        s += "\"schema\":2";
+        s += ",\"event\":\"direct_draw_aggregate\"";
+        s += ",\"reason\":" + hash::Quote(reason ? reason : "");
+        s += ",\"weather_epoch\":" + std::to_string(g_weather.epoch);
+        s += ",\"requested_type\":" + std::to_string(g_weather.requestedType);
+        s += ",\"observed_get_type\":" + std::to_string(g_weather.observedGetType);
+        s += ",\"requested_intensity\":" + std::to_string(g_weather.requestedIntensity);
+        s += ",\"weather_rec_id\":" +
+            std::to_string(g_weather.rec.valid ? g_weather.rec.id : -1);
+        s += ",\"draw_kind\":" + hash::Quote(DrawKindName(c.key.kind));
+        s += ",\"prim_type\":" +
+            std::to_string(static_cast<unsigned>(c.key.primitiveType));
+        s += ",\"calls\":" + std::to_string(c.calls);
+        s += ",\"total_primitives\":" + std::to_string(c.totalPrimitives);
+        s += ",\"min_primitives\":" +
+            std::to_string(c.minPrimitives == std::numeric_limits<uint32_t>::max()
+                               ? 0u
+                               : c.minPrimitives);
+        s += ",\"max_primitives\":" + std::to_string(c.maxPrimitives);
+        s += ",\"first_frame\":" + std::to_string(c.firstFrame);
+        s += ",\"last_frame\":" + std::to_string(c.lastFrame);
+        s += ",\"first_ordinal\":" + std::to_string(c.firstOrdinal);
+        s += ",\"first_phase\":" + hash::Quote(c.firstPhase);
+        s += ",\"last_phase\":" + hash::Quote(c.lastPhase);
+
+        s += ",\"texture\":{";
+        s += "\"token\":" + hash::Quote(Pointer(c.key.texture));
+        s += ",\"width\":" + std::to_string(c.key.width);
+        s += ",\"height\":" + std::to_string(c.key.height);
+        s += ",\"format\":" + std::to_string(static_cast<unsigned>(c.key.format));
+        s += ",\"levels\":" + std::to_string(c.textureLevels);
+        s += ",\"usage\":" + std::to_string(c.textureUsage);
+        s += ",\"pool\":" + std::to_string(static_cast<unsigned>(c.texturePool));
+        s += "}";
+
+        s += ",\"vs_sha256\":" + hash::Quote(c.vsSha);
+        s += ",\"ps_sha256\":" + hash::Quote(c.psSha);
+        s += ",\"vertex_decl_sha256\":" + hash::Quote(c.declSha);
+        s += ",\"fvf\":" + std::to_string(c.fvf);
+        s += ",\"stream0_stride\":" + std::to_string(c.key.stride);
+
+        s += ",\"render_state\":{";
+        s += "\"zenable\":" + std::to_string(c.key.zEnable);
+        s += ",\"zwrite\":" + std::to_string(c.key.zWrite);
+        s += ",\"zfunc\":" + std::to_string(c.key.zFunc);
+        s += ",\"alpha_blend\":" + std::to_string(c.key.alphaBlend);
+        s += ",\"src_blend\":" + std::to_string(c.key.srcBlend);
+        s += ",\"dst_blend\":" + std::to_string(c.key.dstBlend);
+        s += ",\"blend_op\":" + std::to_string(c.key.blendOp);
+        s += ",\"alpha_test\":" + std::to_string(c.key.alphaTest);
+        s += ",\"alpha_ref\":" + std::to_string(c.key.alphaRef);
+        s += ",\"alpha_func\":" + std::to_string(c.key.alphaFunc);
+        s += ",\"cull\":" + std::to_string(c.key.cull);
+        s += ",\"color_write\":" + std::to_string(c.key.colorWrite);
+        s += "}";
+
+        s += ",\"sampler0\":{";
+        s += "\"address_u\":" + std::to_string(c.samplerAddressU);
+        s += ",\"address_v\":" + std::to_string(c.samplerAddressV);
+        s += ",\"mag_filter\":" + std::to_string(c.samplerMag);
+        s += ",\"min_filter\":" + std::to_string(c.samplerMin);
+        s += ",\"mip_filter\":" + std::to_string(c.samplerMip);
+        s += "}";
+
+        s += "}";
+        EmitLine(std::move(s));
+        ++g_drawRecords;
+    }
+
+    g_directCandidates.clear();
+    g_sink.flush();
+}
+
+HRESULT STDMETHODCALLTYPE hkDrawPrimitive(
+    IDirect3DDevice9* d,
+    D3DPRIMITIVETYPE primitiveType,
+    UINT startVertex,
+    UINT primitiveCount)
+{
+    ObserveDirectDraw(
+        d, DirectDrawKind::Primitive, primitiveType, primitiveCount, 0);
+    return g_origDrawPrimitive
+        ? g_origDrawPrimitive(d, primitiveType, startVertex, primitiveCount)
+        : D3DERR_INVALIDCALL;
+}
+
+HRESULT STDMETHODCALLTYPE hkDrawIndexedPrimitive(
+    IDirect3DDevice9* d,
+    D3DPRIMITIVETYPE primitiveType,
+    INT baseVertexIndex,
+    UINT minVertexIndex,
+    UINT numVertices,
+    UINT startIndex,
+    UINT primitiveCount)
+{
+    ObserveDirectDraw(
+        d, DirectDrawKind::IndexedPrimitive, primitiveType, primitiveCount, 0);
+    return g_origDrawIndexedPrimitive
+        ? g_origDrawIndexedPrimitive(
+              d, primitiveType, baseVertexIndex, minVertexIndex,
+              numVertices, startIndex, primitiveCount)
+        : D3DERR_INVALIDCALL;
+}
+
+HRESULT STDMETHODCALLTYPE hkDrawPrimitiveUP(
+    IDirect3DDevice9* d,
+    D3DPRIMITIVETYPE primitiveType,
+    UINT primitiveCount,
+    const void* vertexData,
+    UINT stride)
+{
+    ObserveDirectDraw(
+        d, DirectDrawKind::PrimitiveUP, primitiveType, primitiveCount, stride);
+    return g_origDrawPrimitiveUP
+        ? g_origDrawPrimitiveUP(
+              d, primitiveType, primitiveCount, vertexData, stride)
+        : D3DERR_INVALIDCALL;
+}
+
+HRESULT STDMETHODCALLTYPE hkDrawIndexedPrimitiveUP(
+    IDirect3DDevice9* d,
+    D3DPRIMITIVETYPE primitiveType,
+    UINT minVertexIndex,
+    UINT numVertices,
+    UINT primitiveCount,
+    const void* indexData,
+    D3DFORMAT indexFormat,
+    const void* vertexData,
+    UINT stride)
+{
+    ObserveDirectDraw(
+        d, DirectDrawKind::IndexedPrimitiveUP, primitiveType, primitiveCount, stride);
+    return g_origDrawIndexedPrimitiveUP
+        ? g_origDrawIndexedPrimitiveUP(
+              d, primitiveType, minVertexIndex, numVertices,
+              primitiveCount, indexData, indexFormat, vertexData, stride)
+        : D3DERR_INVALIDCALL;
 }
 
 bool ContainsWeatherToken(const char* name)
@@ -764,6 +1047,13 @@ private:
         g_phase = "end_scene";
 
         static uint64_t lastSummaryFrame = 0;
+        static uint64_t lastAggregateFlushFrame = 0;
+        if (g_frame >= lastAggregateFlushFrame + 900)
+        {
+            lastAggregateFlushFrame = g_frame;
+            FlushDirectCandidates("periodic_900_frames");
+        }
+
         if (g_frame >= lastSummaryFrame + 300)
         {
             lastSummaryFrame = g_frame;
@@ -828,8 +1118,29 @@ bool Install()
             64,
             kHardMaxDrawRecords);
 
+    g_config.minPrimitives =
+        UintEnv(
+            "WXL_R8_WEATHER_DIAG_MIN_PRIMS",
+            16,
+            1,
+            65535);
+
     if (!VerifyCanonicalExecutable())
         return true;
+
+    IDirect3DDevice9* rawDevice =
+        static_cast<IDirect3DDevice9*>(gx::RawDevice());
+    if (!rawDevice)
+    {
+        WLOG_ERROR("wxl-r8-weather-w1: no live D3D9 device for direct draw observer");
+        return true;
+    }
+
+    void** d3dVtable = *reinterpret_cast<void***>(rawDevice);
+    g_directDrawTargets[0] = d3dVtable[gxoff::vt::kDrawPrimitive];
+    g_directDrawTargets[1] = d3dVtable[gxoff::vt::kDrawIndexedPrimitive];
+    g_directDrawTargets[2] = d3dVtable[gxoff::vt::kDrawPrimitiveUP];
+    g_directDrawTargets[3] = d3dVtable[gxoff::vt::kDrawIndexedPrimitiveUP];
 
     CreateDirectoryA("Logs", nullptr);
     g_sink.open(
@@ -851,12 +1162,16 @@ bool Install()
     header += ",\"weather_clear\":" + hash::Quote(Pointer(reinterpret_cast<void*>(kWeatherClear)));
     header += ",\"weather_get_type\":" + hash::Quote(Pointer(reinterpret_cast<void*>(kWeatherGetType)));
     header += ",\"smsg_weather_landmark\":" + hash::Quote(Pointer(reinterpret_cast<void*>(kSmsWeatherPath)));
-    header += ",\"gx_device_draw\":" + hash::Quote(Pointer(reinterpret_cast<void*>(gxoff::kGxDeviceDraw)));
+    header += ",\"d3d_draw_primitive\":" + hash::Quote(Pointer(g_directDrawTargets[0]));
+    header += ",\"d3d_draw_indexed_primitive\":" + hash::Quote(Pointer(g_directDrawTargets[1]));
+    header += ",\"d3d_draw_primitive_up\":" + hash::Quote(Pointer(g_directDrawTargets[2]));
+    header += ",\"d3d_draw_indexed_primitive_up\":" + hash::Quote(Pointer(g_directDrawTargets[3]));
     header += ",\"max_draw_records\":" + std::to_string(g_config.maxDrawRecords);
+    header += ",\"min_primitives\":" + std::to_string(g_config.minPrimitives);
     header += ",\"candidate_filter\":" + hash::Quote(
         g_config.allDraws
-            ? "all_gx_draws"
-            : "world_scene_or_liquid + zenable + alpha_blend_or_test + colorwrite");
+            ? "all_direct_d3d_draws_with_stage0_texture"
+            : "direct_d3d + prims>=min + zenable + !zwrite + alphablend + colorwrite + nonRT_stage0");
     header += ",\"mutates_render_state\":false";
     header += ",\"changes_weather\":false";
     header += "}";
@@ -878,10 +1193,28 @@ bool Install()
         &g_origClear);
 
     ok &= wxl::hook::Install(
-        "R8WeatherW1GxDrawObserver",
-        gxoff::kGxDeviceDraw,
-        &hkGxDeviceDraw,
-        &g_origGxDeviceDraw);
+        "R8WeatherW1D3DDrawPrimitiveObserver",
+        g_directDrawTargets[0],
+        reinterpret_cast<void*>(&hkDrawPrimitive),
+        reinterpret_cast<void**>(&g_origDrawPrimitive));
+
+    ok &= wxl::hook::Install(
+        "R8WeatherW1D3DDrawIndexedPrimitiveObserver",
+        g_directDrawTargets[1],
+        reinterpret_cast<void*>(&hkDrawIndexedPrimitive),
+        reinterpret_cast<void**>(&g_origDrawIndexedPrimitive));
+
+    ok &= wxl::hook::Install(
+        "R8WeatherW1D3DDrawPrimitiveUPObserver",
+        g_directDrawTargets[2],
+        reinterpret_cast<void*>(&hkDrawPrimitiveUP),
+        reinterpret_cast<void**>(&g_origDrawPrimitiveUP));
+
+    ok &= wxl::hook::Install(
+        "R8WeatherW1D3DDrawIndexedPrimitiveUPObserver",
+        g_directDrawTargets[3],
+        reinterpret_cast<void*>(&hkDrawIndexedPrimitiveUP),
+        reinterpret_cast<void**>(&g_origDrawIndexedPrimitiveUP));
 
     if (!ok)
     {
@@ -894,9 +1227,10 @@ bool Install()
 
     WLOG_INFO(
         "wxl-r8-weather-w1: observer enabled "
-        "output=Logs\\weather-w1.ndjson maxDraws=%u allDraws=%u "
-        "visual_changes=0",
+        "output=Logs\\weather-w1.ndjson maxDraws=%u minPrims=%u allDraws=%u "
+        "direct_d3d=1 visual_changes=0",
         g_config.maxDrawRecords,
+        g_config.minPrimitives,
         g_config.allDraws ? 1u : 0u);
 
     return true;
@@ -905,7 +1239,7 @@ bool Install()
 } // namespace
 
 WXL_REGISTER_FEATURE(
-    "render-modern-r8-weather-w1-observer",
+    "render-modern-r8-weather-w1r4-direct-d3d-observer",
     true,
     Install);
 
