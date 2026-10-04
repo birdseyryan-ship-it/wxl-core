@@ -106,6 +106,7 @@ namespace wxl::scripts::render_modern::d3d9fallback
         bool g_loggedAoProjection = false;
         bool g_loggedAoProduction = false;
         bool g_loggedAoFastProduction = false;
+        bool g_loggedAoDisabled = false;
 
         struct FsVertex
         {
@@ -276,6 +277,34 @@ namespace wxl::scripts::render_modern::d3d9fallback
             return enabled;
         }
 
+        bool AoProductionDisabled()
+        {
+            static const bool disabled = []()
+            {
+                char raw[16] = {};
+
+                const DWORD n =
+                    GetEnvironmentVariableA(
+                        "WXL_R8_AO_DISABLE",
+                        raw,
+                        sizeof(raw));
+
+                if (n == 0 ||
+                    n >= sizeof(raw))
+                {
+                    return false;
+                }
+
+                const char c = raw[0];
+
+                return c != '0' &&
+                       c != 'n' && c != 'N' &&
+                       c != 'f' && c != 'F';
+            }();
+
+            return disabled;
+        }
+
         int AoProofMode()
         {
             static const int mode = []()
@@ -423,6 +452,7 @@ namespace wxl::scripts::render_modern::d3d9fallback
             g_loggedAoProjection = false;
             g_loggedAoProduction = false;
             g_loggedAoFastProduction = false;
+            g_loggedAoDisabled = false;
         }
 
         bool CompilePixelShader(IDirect3DDevice9* dev,
@@ -1938,13 +1968,18 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
         const int aoDenoiseTuneMode =
             AoDenoiseTuneMode();
 
-        // R3E4 production AO is independent of the diagnostic environment
-        // switches and defaults ON for Classic Enhanced.
+        // R3E4 production AO remains ON by default for Classic Enhanced.
+        // Step11H A4 adds one explicit default-off diagnostic bypass so the
+        // fog/AO ordering hypothesis can be isolated without the F9 overlay.
+        const bool productionAoDisabled =
+            AoProductionDisabled();
+
         bool productionAo =
             !depthProof &&
             !aoProof &&
             !g_proofTint &&
-            g_ambientOcclusion;
+            g_ambientOcclusion &&
+            !productionAoDisabled;
 
         // Production should degrade gracefully to colour-only AA if a single
         // frame ever arrives without the retained world depth/projection.
@@ -2024,6 +2059,16 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             WLOG_INFO(
                 "wxl-modern-r3e4: production CE AO enabled "
                 "preset=2 chain-before-AA");
+        }
+
+        if (productionAoDisabled &&
+            !g_loggedAoDisabled)
+        {
+            g_loggedAoDisabled = true;
+
+            WLOG_INFO(
+                "wxl-r8-diag: production CE AO disabled "
+                "by WXL_R8_AO_DISABLE=1; AA remains available");
         }
 
         if (productionAo &&
